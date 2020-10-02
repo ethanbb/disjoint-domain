@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<tree>
+    <node name="organism" can="grow" is="living">
+        <node name="plant" has="roots">
+            <node name="tree" has="bark branches" is="big">
+                <node name="pine" is="green" />
+                <node name="oak" has="leaves" />
+            </node>
+            <node name="flower" has="leaves petals" is="pretty">
+                <node name="rose" is="red" />
+                <node name="daisy" is="yellow" />
+            </node>
+        </node>
+        <node name="animal" can="move" has="skin">
+            <node name="bird" has="feathers wings" can="fly">
+                <node name="robin" is="red" />
+                <node name="canary" is="yellow" can="sing" />
+            </node>
+            <node name="fish" has="scales gills" can="swim">
+                <node name="sunfish" is="yellow" />
+                <node name="salmon" is="red" />
+            </node>
+        </node>
+    </node>
+</tree>

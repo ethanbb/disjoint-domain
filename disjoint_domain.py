@@ -18,7 +18,7 @@ def make_attr_vecs(n_contexts=4, attrs_per_context=50, rng_seed=None):
     rng = np.random.default_rng(seed=rng_seed)
 
     n_items = 8
-    attrs = [np.zeros((n_items, attrs_per_context), dtype='int32') for c in range(n_contexts)]
+    attrs = [np.zeros((n_items, attrs_per_context), dtype='int32') for _ in range(n_contexts)]
 
     for kC in range(n_contexts):
         # first, handle items 1-4, which all pairwise have distance 2, i.e. each pair differs by 4 bits.
@@ -74,16 +74,46 @@ def make_attr_vecs(n_contexts=4, attrs_per_context=50, rng_seed=None):
     return attrs
 
 
-def plot_item_attributes():
-    attrs = make_attr_vecs()
+def plot_item_attributes(attrs):
+    """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
-    fig, ax = plt.subplots(2, 1)
+    n_items = 8
+    n_ctx = len(attrs)
 
-    # plot 1: attributes in each context
+    fig = plt.figure()
+
+    # plot 1: items
+    ax = fig.add_subplot(1, 20, (1, 3))
+    ax.set_title('Items')
+    item_mat = np.tile(np.eye(n_items), (n_ctx, 1))
+    ax.imshow(item_mat, aspect='auto', interpolation='nearest')
+    ax.set_yticks([])
+    ax.set_xticks(range(0, n_items, 2))
+
+    # plot 2: contexts
+    ax = fig.add_subplot(1, 20, 4)
+    ax.set_title('Contexts')
+    context_mat = np.repeat(np.eye(n_ctx), n_items, axis=0)
+    ax.imshow(context_mat, aspect='auto', interpolation='nearest')
+    ax.set_yticks([])
+    ax.set_xticks(range(0, n_ctx, 2))
+
+    # plot 3: attributes
+    ax = fig.add_subplot(1, 20, (5, 20))
+    ax.set_title('Attributes')
     attr_mat = block_diag(*attrs)
-    ax[0].matshow(attr_mat)
+    ax.imshow(attr_mat, aspect='auto', interpolation='nearest')
+    ax.set_yticks([])
+    ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
-    # plot 2: dendrogram of item attributes across contexts (for a single domain)
+
+def plot_item_attribute_dendroram(attrs):
+    """Dendrogram of similarities between the items' attributes, collapsed across contexts (regardless of domain)"""
+
+    fig, ax = plt.subplots()
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
     z = hierarchy.linkage(mean_dist)
-    hierarchy.dendrogram(z, ax=ax[1])
+    hierarchy.dendrogram(z, ax=ax)
+    ax.set_title('Item attribute similarities, collapsed across contexts')
+    ax.set_ylabel('Euclidean distance')
+    ax.set_xlabel('Input #')

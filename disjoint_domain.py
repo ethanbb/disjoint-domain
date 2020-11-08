@@ -3,36 +3,52 @@ from scipy.linalg import block_diag
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 import matplotlib.pyplot as plt
+import torch
 
-N_ITEMS = 8
+ITEMS_PER_DOMAIN = 8
 
 
-def _make_attr_vecs(n_contexts, attrs_per_context, rng):
+def choose_k_inds(n, k=1):
+    """Get random permutation of k indices in range(n)"""
+    return torch.randperm(n, device='cpu')[:k]
+
+
+def choose_k(a, k=1):
+    """
+    Get permutation of k items from a using PyTorch
+    (want to make sure we use the same rng for everything so it's deterministic given the seed)
+    """
+    return a[choose_k_inds(len(a), k)]
+
+
+def choose_k_set_bits(a, k=1):
+    """Get permutation of k indices of a that are set (a should be a boolean array)"""
+    return choose_k(np.flatnonzero(a), k)
+
+
+def _make_attr_vecs(ctx_per_domain, attrs_per_context):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
-    There are 8 items. Outputs a list of n_contexts 8 x attrs_per_context matrices.
+    There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
     These attributes are simply repeated for each domain.
 
     Input attrs_per_context must be at least 50 (approximately) in order for the distances to be correct.
     Each vector has 25 attributes activated within the current context, so that cross-context distances are sqrt(50).
     """
 
-    if rng is None:
-        rng = np.random.default_rng()
+    attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
 
-    attrs = [np.zeros((N_ITEMS, attrs_per_context), dtype='int32') for _ in range(n_contexts)]
-
-    for kC in range(n_contexts):
+    for kC in range(ctx_per_domain):
         # first, handle items 1-4, which all pairwise have distance 2, i.e. each pair differs by 4 bits.
         # choose centroid randomly
-        circ_centroid = np.zeros(attrs_per_context, dtype='int32')
-        circ_centroid_set = rng.choice(attrs_per_context, 25, replace=False)
+        circ_centroid = np.zeros(attrs_per_context)
+        circ_centroid_set = choose_k(np.arange(attrs_per_context), 25)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set)
         circ_centroid[circ_centroid_set] = 1
 
         # now choose 2 distinct bits to flip for each of the 4 vectors, keeping total # set = 25
-        set_bits = rng.choice(circ_centroid_unset, 4, replace=False)
-        unset_bits = rng.choice(circ_centroid_set, 4, replace=False)
+        set_bits = choose_k(circ_centroid_unset, 4)
+        unset_bits = choose_k(circ_centroid_set, 4)
 
         for k in range(4):
             attrs[kC][k, :] = circ_centroid
@@ -41,12 +57,12 @@ def _make_attr_vecs(n_contexts, attrs_per_context, rng):
 
         # pick centroid for other 4 items, which should be 40 bits away from this centroid.
         other_centroid = circ_centroid.copy()
-        other_centroid[rng.choice(circ_centroid_unset, 20, replace=False)] = 1
-        other_centroid[rng.choice(circ_centroid_set, 20, replace=False)] = 0
+        other_centroid[choose_k(circ_centroid_unset, 20)] = 1
+        other_centroid[choose_k(circ_centroid_set, 20)] = 0
 
         # now square and star centroids, which are centered on other_centroid and differ by 12 bits
-        set_bits = rng.choice(np.flatnonzero(other_centroid == 0), 6, replace=False)
-        unset_bits = rng.choice(np.flatnonzero(other_centroid), 6, replace=False)
+        set_bits = choose_k_set_bits(other_centroid == 0, 6)
+        unset_bits = choose_k_set_bits(other_centroid, 6)
 
         square_centroid = other_centroid.copy()
         square_centroid[set_bits[:3]] = 1
@@ -58,12 +74,12 @@ def _make_attr_vecs(n_contexts, attrs_per_context, rng):
 
         # squares (vectors 5 and 6) differ by just 2 bits. be a little imprecise and let one of them be the centroid.
         attrs[kC][4:6, :] = square_centroid
-        attrs[kC][5, rng.choice(np.flatnonzero(square_centroid))] = 0
-        attrs[kC][5, rng.choice(np.flatnonzero(square_centroid == 0))] = 1
+        attrs[kC][5, choose_k_set_bits(square_centroid)] = 0
+        attrs[kC][5, choose_k_set_bits(square_centroid == 0)] = 1
 
         # stars differ by 10 bits. again be a little imprecise, let one differ from centroid by 4 and the other by 6 (all unique)
-        set_bits = rng.choice(np.flatnonzero(star_centroid == 0), 5, replace=False)
-        unset_bits = rng.choice(np.flatnonzero(star_centroid), 5, replace=False)
+        set_bits = choose_k_set_bits(star_centroid == 0, 5)
+        unset_bits = choose_k_set_bits(star_centroid, 5)
 
         attrs[kC][6, :] = star_centroid
         attrs[kC][6, set_bits[:2]] = 1
@@ -76,13 +92,13 @@ def _make_attr_vecs(n_contexts, attrs_per_context, rng):
     return attrs
 
 
-def make_io_mats(n_contexts=4, attrs_per_context=50, rng=None, n_domains=4):
+def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4):
     """Make the actual item, context, and attribute matrices, across a given number of domains."""
 
     # First make it for a single domain, then use block_diag to replicate.
-    item_mat_1 = np.tile(np.eye(N_ITEMS), (n_contexts, 1))
-    context_mat_1 = np.repeat(np.eye(n_contexts), N_ITEMS, axis=0)
-    attrs = _make_attr_vecs(n_contexts, attrs_per_context, rng)
+    item_mat_1 = np.tile(np.eye(ITEMS_PER_DOMAIN), (ctx_per_domain, 1))
+    context_mat_1 = np.repeat(np.eye(ctx_per_domain), ITEMS_PER_DOMAIN, axis=0)
+    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context)
     attr_mat_1 = block_diag(*attrs)
 
     item_mat = block_diag(*[item_mat_1 for _ in range(n_domains)])
@@ -92,10 +108,10 @@ def make_io_mats(n_contexts=4, attrs_per_context=50, rng=None, n_domains=4):
     return item_mat, context_mat, attr_mat
 
 
-def plot_item_attributes(n_contexts=4, attrs_per_context=50, rng=None):
+def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
-    item_mat, context_mat, attr_mat = make_io_mats(n_contexts, attrs_per_context, rng, n_domains=1)
+    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context)
 
     fig = plt.figure()
 
@@ -104,7 +120,7 @@ def plot_item_attributes(n_contexts=4, attrs_per_context=50, rng=None):
     ax.set_title('Items')
     ax.imshow(item_mat, aspect='auto', interpolation='nearest')
     ax.set_yticks([])
-    ax.set_xticks(range(0, N_ITEMS, 2))
+    ax.set_xticks(range(0, ITEMS_PER_DOMAIN, 2))
 
     # plot 2: contexts
     ax = fig.add_subplot(1, 20, 4)
@@ -121,10 +137,10 @@ def plot_item_attributes(n_contexts=4, attrs_per_context=50, rng=None):
     ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
 
-def plot_item_attribute_dendroram(n_contexts=4, attrs_per_context=50, rng=None):
+def plot_item_attribute_dendroram(ctx_per_domain=4, attrs_per_context=50):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
-    attrs = _make_attr_vecs(n_contexts, attrs_per_context, rng)
+    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context)
 
     fig, ax = plt.subplots()
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
@@ -133,3 +149,87 @@ def plot_item_attribute_dendroram(n_contexts=4, attrs_per_context=50, rng=None):
     ax.set_title('Item attribute similarities, collapsed across contexts')
     ax.set_ylabel('Euclidean distance')
     ax.set_xlabel('Input #')
+
+
+def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
+    """Establish floating-point type and device to use with PyTorch"""
+
+    if device is None:
+        if use_cuda_if_possible and torch.cuda.is_available():
+            device = torch.device('cuda')
+        else:
+            device = torch.device('cpu')
+
+    if device.type == 'cuda':
+        ttype_ns = torch.cuda
+    else:
+        ttype_ns = torch
+
+    if torchfp is None:
+        torchfp = torch.float
+
+    if torchfp == torch.float:
+        torch.set_default_tensor_type(ttype_ns.FloatTensor)
+    elif torchfp == torch.double:
+        torch.set_default_tensor_type(ttype_ns.DoubleTensor)
+    else:
+        raise NotImplementedError(f'No tensor type known for dtype {torchfp}')
+
+    return device, torchfp
+
+
+def item_group(n):
+    """Equivalent of circle/square/star, to identify 'types' of items"""
+    if n < 4:
+        return 0
+    elif n < 6:
+        return 1
+    else:
+        return 2
+
+
+def item_group_symbol(n):
+    return ['*', '@', '$'][item_group(n)]
+    
+
+def domain_name(n):
+    return chr(ord('A') + n)
+
+
+def get_items(n_domains=4):
+    """Get item tensors (without repetitions) and their corresponding names"""
+    items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
+    item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n)
+                  for d in range(n_domains) for n in range(ITEMS_PER_DOMAIN)]
+    return items, item_names
+
+
+def get_contexts(n_domains=4, ctx_per_domain=4):
+    """Get context tensors (without repetitions) and their corresponding names"""
+    contexts = torch.eye(ctx_per_domain * n_domains)
+    context_names = [domain_name(d) + str(n+1) for d in range(n_domains) for n in range(ctx_per_domain)]
+    return contexts, context_names
+
+
+def get_net_defaults():
+    """Get some basic facts about the default architecture"""
+    ctx_per_domain = 4
+    n_domains = 4
+    n_items = ITEMS_PER_DOMAIN * n_domains
+    n_ctx = ctx_per_domain * n_domains
+    attrs_per_context = 50
+
+    return ctx_per_domain, n_domains, n_items, n_ctx, attrs_per_context
+
+
+def calc_snap_epochs(snap_freq, snap_freq_scale, num_epochs):
+    """Given the possibility of taking snapshots on a log scale, get the actual snapshot epochs"""
+    if snap_freq_scale == 'log':
+        snap_epochs = np.arange(0, np.log2(num_epochs), snap_freq)
+        snap_epochs = np.exp2(snap_epochs)
+    elif snap_freq_scale == 'lin':
+        snap_epochs = np.arange(0, num_epochs, snap_freq)
+    else:
+        raise ValueError(f'Unkonwn snap_freq_scale {snap_freq_scale}')
+
+    return np.unique(np.round(snap_epochs).astype(int))

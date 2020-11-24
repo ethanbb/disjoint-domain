@@ -26,7 +26,20 @@ def choose_k_set_bits(a, k=1):
     return choose_k(np.flatnonzero(a), k)
 
 
-def _make_attr_vecs(ctx_per_domain, attrs_per_context):
+def _make_4_similar_attr_vecs(centroid):
+    """Useful for making 'circles,' and reused if simplified == True"""
+    set_bits = choose_k_set_bits(1 - centroid, 4)
+    unset_bits = choose_k_set_bits(centroid, 4)
+
+    similar_vecs = np.tile(centroid.copy(), (4, 1))
+    for k in range(4):
+        similar_vecs[k, set_bits[k]] = 1
+        similar_vecs[k, unset_bits[k]] = 0
+
+    return similar_vecs
+
+
+def _make_attr_vecs(ctx_per_domain, attrs_per_context, simplified=False):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
@@ -34,6 +47,11 @@ def _make_attr_vecs(ctx_per_domain, attrs_per_context):
 
     Input attrs_per_context must be at least 50 (approximately) in order for the distances to be correct.
     Each vector has 25 attributes activated within the current context, so that cross-context distances are sqrt(50).
+    
+    Simplified flag: if true, makes 4 "circles" and 4 "squares," where the similarity among squares is
+    the same as similarity among circles. This is a symmetric case to test whether the network is picking
+    up some higher-level property of the circles ("typicality") or just using the representation layer to make
+    the most useful split of the items in each domain.
     """
 
     attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
@@ -47,21 +65,20 @@ def _make_attr_vecs(ctx_per_domain, attrs_per_context):
         circ_centroid[circ_centroid_set] = 1
 
         # now choose 2 distinct bits to flip for each of the 4 vectors, keeping total # set = 25
-        set_bits = choose_k(circ_centroid_unset, 4)
-        unset_bits = choose_k(circ_centroid_set, 4)
-
-        for k in range(4):
-            attrs[kC][k, :] = circ_centroid
-            attrs[kC][k, set_bits[k]] = 1
-            attrs[kC][k, unset_bits[k]] = 0
+        attrs[kC][:4] = _make_4_similar_attr_vecs(circ_centroid)
 
         # pick centroid for other 4 items, which should be 40 bits away from this centroid.
         other_centroid = circ_centroid.copy()
         other_centroid[choose_k(circ_centroid_unset, 20)] = 1
         other_centroid[choose_k(circ_centroid_set, 20)] = 0
+        
+        if simplified:
+            # proceed as in the circle centroid to make 4 "squares"
+            attrs[kC][4:] = _make_4_similar_attr_vecs(other_centroid)
+            continue
 
         # now square and star centroids, which are centered on other_centroid and differ by 12 bits
-        set_bits = choose_k_set_bits(other_centroid == 0, 6)
+        set_bits = choose_k_set_bits(1-other_centroid, 6)
         unset_bits = choose_k_set_bits(other_centroid, 6)
 
         square_centroid = other_centroid.copy()
@@ -75,10 +92,10 @@ def _make_attr_vecs(ctx_per_domain, attrs_per_context):
         # squares (vectors 5 and 6) differ by just 2 bits. be a little imprecise and let one of them be the centroid.
         attrs[kC][4:6, :] = square_centroid
         attrs[kC][5, choose_k_set_bits(square_centroid)] = 0
-        attrs[kC][5, choose_k_set_bits(square_centroid == 0)] = 1
+        attrs[kC][5, choose_k_set_bits(1-square_centroid)] = 1
 
         # stars differ by 10 bits. again be a little imprecise, let one differ from centroid by 4 and the other by 6 (all unique)
-        set_bits = choose_k_set_bits(star_centroid == 0, 5)
+        set_bits = choose_k_set_bits(1-star_centroid, 5)
         unset_bits = choose_k_set_bits(star_centroid, 5)
 
         attrs[kC][6, :] = star_centroid
@@ -92,13 +109,13 @@ def _make_attr_vecs(ctx_per_domain, attrs_per_context):
     return attrs
 
 
-def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4):
+def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4, simplified=False):
     """Make the actual item, context, and attribute matrices, across a given number of domains."""
 
     # First make it for a single domain, then use block_diag to replicate.
     item_mat_1 = np.tile(np.eye(ITEMS_PER_DOMAIN), (ctx_per_domain, 1))
     context_mat_1 = np.repeat(np.eye(ctx_per_domain), ITEMS_PER_DOMAIN, axis=0)
-    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context)
+    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context, simplified=simplified)
     attr_mat_1 = block_diag(*attrs)
 
     item_mat = block_diag(*[item_mat_1 for _ in range(n_domains)])
@@ -108,10 +125,10 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4):
     return item_mat, context_mat, attr_mat
 
 
-def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50):
+def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, simplified=False):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
-    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context)
+    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, n_domains=1, simplified=simplified)
 
     fig = plt.figure()
 
@@ -137,10 +154,10 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50):
     ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
 
-def plot_item_attribute_dendroram(ctx_per_domain=4, attrs_per_context=50):
+def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, simplified=False):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
-    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context)
+    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context, simplified=simplified)
 
     fig, ax = plt.subplots()
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
@@ -178,46 +195,41 @@ def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
     return device, torchfp
 
 
-def item_group(n):
+def item_group(n, simplified=False, **_extra):
     """Equivalent of circle/square/star, to identify 'types' of items"""
-    if n < 4:
-        return 0
-    elif n < 6:
-        return 1
-    else:
-        return 2
+    group = n // 4
+    if not simplified:
+        group += n // 6
+    return group
 
 
-def item_group_symbol(n):
-    return ['*', '@', '$'][item_group(n)]
+def item_group_symbol(n, simplified=False):
+    return ['*', '@', '$'][item_group(n, simplified)]
     
 
 def domain_name(n):
     return chr(ord('A') + n)
 
 
-def get_items(n_domains=4):
+def get_items(n_domains=4, simplified=False, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
     items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
-    item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n)
+    item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, simplified)
                   for d in range(n_domains) for n in range(ITEMS_PER_DOMAIN)]
     return items, item_names
 
 
-def get_contexts(n_domains=4, ctx_per_domain=4):
+def get_contexts(n_domains=4, ctx_per_domain=4, **_extra):
     """Get context tensors (without repetitions) and their corresponding names"""
     contexts = torch.eye(ctx_per_domain * n_domains)
     context_names = [domain_name(d) + str(n+1) for d in range(n_domains) for n in range(ctx_per_domain)]
     return contexts, context_names
 
 
-def get_net_defaults():
-    """Get some basic facts about the default architecture"""
-    ctx_per_domain = 4
-    n_domains = 4
+def get_net_dims(n_domains=4, ctx_per_domain=4, attrs_per_context=50, **_extra):
+    """Get some basic facts about the default architecture, possibly with overrides"""
     n_items = ITEMS_PER_DOMAIN * n_domains
     n_ctx = ctx_per_domain * n_domains
-    attrs_per_context = 50
 
     return ctx_per_domain, n_domains, n_items, n_ctx, attrs_per_context
 
@@ -232,4 +244,4 @@ def calc_snap_epochs(snap_freq, snap_freq_scale, num_epochs):
     else:
         raise ValueError(f'Unkonwn snap_freq_scale {snap_freq_scale}')
 
-    return np.unique(np.round(snap_epochs).astype(int))
+    return list(np.unique(np.round(snap_epochs).astype(int)))

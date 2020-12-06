@@ -154,14 +154,22 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, simplified=Fals
     ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
 
+def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, simplified=False):
+    """Make RDM of similarities between the items' attributes, collapsed across contexts"""
+    
+    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context, simplified=simplified)
+    mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
+    return distance.squareform(mean_dist)
+
+    
 def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, simplified=False):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
-    attrs = _make_attr_vecs(ctx_per_domain, attrs_per_context, simplified=simplified)
-
+    dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context, simplified)
+    condensed_dist = distance.squareform(dist_mat)
+    
     fig, ax = plt.subplots()
-    mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
-    z = hierarchy.linkage(mean_dist)
+    z = hierarchy.linkage(condensed_dist)
     hierarchy.dendrogram(z, ax=ax)
     ax.set_title('Item attribute similarities, collapsed across contexts')
     ax.set_ylabel('Euclidean distance')

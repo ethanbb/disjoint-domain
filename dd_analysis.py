@@ -6,9 +6,12 @@ import matplotlib.colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D # noqa
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
+from scipy.linalg import block_diag
 from scipy import stats
 from sklearn.manifold import MDS
 from itertools import product
+from statsmodels.regression.linear_model import OLS
+from patsy import dmatrices
 
 import disjoint_domain as dd
 
@@ -52,6 +55,19 @@ def get_mean_repr_dists(repr_snaps):
     return {'all': mean_dists_all, 'snaps': mean_dists_snaps}
 
 
+def get_mean_and_ci(series_set):
+    """
+    Given a set of N time series, compute and return the mean
+    along with 95% confidence interval using a t-distribution.
+    """
+    n = series_set.shape[0]
+    mean = np.mean(series_set, axis=0)
+    stderr = np.std(series_set, axis=0) / np.sqrt(n)
+    interval = stats.t.interval(0.95, df=n-1, loc=mean, scale=stderr)
+    
+    return mean, interval
+
+
 def get_result_means(res_path):
     """Get dict of data (meaned over runs) from saved file"""
     with np.load(res_path, allow_pickle=True) as resfile:
@@ -65,10 +81,13 @@ def get_result_means(res_path):
         for snap_type, repr_snaps in snaps.items()
     }
 
-    mean_reports = {
-        report_type: np.mean(report, axis=0)
+    report_stats = {
+        report_type: get_mean_and_ci(report)
         for report_type, report in reports.items()
     }
+    
+    report_means = {report_type: rstats[0] for report_type, rstats in report_stats.items()}
+    report_cis = {report_type: rstats[1] for report_type, rstats in report_stats.items()}
 
     snap_epochs = dd.calc_snap_epochs(
         train_params['snap_freq'], train_params['snap_freq_scale'],
@@ -80,7 +99,8 @@ def get_result_means(res_path):
     return {
         'path': res_path,
         'repr_dists': mean_repr_dists,
-        'reports': mean_reports,
+        'reports': report_means,
+        'report_cis': report_cis,
         'net_params': net_params,
         'train_params': train_params,
         'snap_epochs': snap_epochs,
@@ -109,10 +129,13 @@ def outside_legend(ax, **legend_params):
     ax.legend(loc='upper left', bbox_to_anchor=(1, 1), **legend_params)
 
 
-def plot_report(ax, res, report_type, **plot_params):
+def plot_report(ax, res, report_type, with_ci=True, label=None, **plot_params):
     """Make a standard plot of mean loss, accuracy, etc. over training"""
     xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
-    ax.plot(xaxis, res['reports'][report_type], **plot_params)
+    ax.plot(xaxis, res['reports'][report_type], label=label, **plot_params)
+    if with_ci:
+        ax.fill_between(xaxis, *res['report_cis'][report_type], **{'alpha': 0.3, **plot_params})
+        
     ax.set_xlabel('Epoch')
     ax.set_title(report_titles[report_type])
 
@@ -145,8 +168,29 @@ def _get_names_for_snapshots(snap_type, **net_params):
     
     return names
     
+    
+def plot_matrix_with_labels(ax, mat, labels, colorbar=True, **imshow_params):
+    """Helper to plot a matrix with each row/column labeled with 'labels'"""
+    n = len(labels)
+    assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
+    assert n == mat.shape[0], 'Wrong number of labels'
+    
+    image = ax.imshow(mat, **imshow_params)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(labels)
+    ax.tick_params(axis='x', labelrotation=45)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(labels)
+    
+    if colorbar:
+        # some magic from SO
+        ax.get_figure().colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    
+    return image
+    
 
-def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-outer', colorbar=True, rsa_mat=None):
+def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-outer',
+             colorbar=True, rsa_mat=None):
     """
     Plot an RSA matrix for the representation of items or contexts at a particular epoch
     item_order: controls the order of items in the matrix - either a string or an
@@ -182,21 +226,13 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
         input_names = [input_names[i] for i in perm]
         rsa_mat = rsa_mat[np.ix_(perm, perm)]
 
-    image = ax.imshow(rsa_mat)
-    ax.set_xticks(range(n_inputs))
-    ax.set_xticklabels(input_names)
-    ax.tick_params(axis='x', labelrotation=45)
-    ax.set_yticks(range(n_inputs))
-    ax.set_yticklabels(input_names)
+    image = plot_matrix_with_labels(ax, rsa_mat, input_names, colorbar=colorbar)
 
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
         title += f' ({title_addon})'
     ax.set_title(title)
-    
-    if colorbar:
-        ax.get_figure().colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-    
+
     return image
 
 
@@ -317,137 +353,183 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
     return image
 
 
-def make_unit_comparison_matrix(b_positive):
-    """
-    Make a model RDM with unit norm that compares two sets of pairs.
-    Input should be a square bool matrix; output is a double matrix of the
-    same shape with all positive entries equal w/ sum of squares 1/2,
-    all negative entries equal w/ sum of squares 1/2,
-    and each entry ij is positive iff b_positive[i,j] is true.
-    """
-    n_pos = np.sum(b_positive)
-    n_neg = b_positive.size - n_pos
+def norm_rdm(dist_mat):
+    """Helper to make a unit model RDM"""
+    return dist_mat / np.linalg.norm(dist_mat)
+
+
+def center_and_norm_rdm(dist_mat):
+    """Helper to make a unit model RDM that sums to 0"""
+    dist_mat_centered = dist_mat - np.mean(dist_mat)
+#     dist_vec = distance.squareform(dist_mat)
+#     dist_mat_centered = distance.squareform(dist_vec - np.mean(dist_vec))
+    return norm_rdm(dist_mat_centered)
     
-    # balance values such that sum of squares of both same and different cells is 1/2
-    val_pos = np.sqrt(n_neg)
-    val_neg = -np.sqrt(n_pos)
-    rdm = np.where(b_positive, val_pos, val_neg)
-    return rdm / np.linalg.norm(rdm)
 
-
-def get_group_model_rdm(n_domains, snap_type='item'):
+def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50, **_extra):
     """
-    Make matrix, with unit Frobenius norm, that compares within-item-group to
-    between-group dissimilarity irrespective of domain. The projection of an RDM onto
-    this matrix indicates how strongly the representations considered make this distinction.
-    """
-    if 'item' not in snap_type:
-        raise ValueError('Group model RDM for contexts does not exist')
-        
-    # make bool matrix of whether item pairs cross groups
-    _, item_names = dd.get_items(n_domains)
-    # TODO: rather than just binary same/different, use actual RDM of item attributes
-    # Also make sure all the model RDMs are orthogonal.
+    Makes a set of model RDMs that have unit norm and are pairwise orthogonal, and
+    are hopefully useful for interpreting item representations in the DDNet.
     
-    group_symbol = np.array([name[-1] for name in item_names])
-    # find where group differs using broadcasting
-    is_different_group = group_symbol[:, np.newaxis] != group_symbol[np.newaxis, :]
+    All models have zeros along the diagonal.
     
-    return make_unit_comparison_matrix(is_different_group)
+        - 'spread'                    - Constant term for all distinct item pairs. All other models sum to 0.
+        - 'attribute_similarity'      - Centered distance between item attribute vectors within each domain 
+                                        (Fig. R3)  
+        - 'same_vs_different_domain'  - Contrasts mean distance between domains vs. within domain
+        - 'cross_domain_group_match'  - Contrasts distance between same-group vs. different-group
+                                        cross-domain pairs (regrdless of any within-domain distances).
+                                        Considers just "circle" and "non-circle" groups for simplicity.
 
+    Returns the set of RDMs as a dict.
+    """    
 
-def get_domain_model_rdm(n_domains, snap_type='item'):
-    """
-    Similar to get_group_model_rdm, but with similarity between
-    all items (or contexts) within each domain rather than between groups across domains.
-    """
-    input_names = _get_names_for_snapshots(snap_type, n_domains=n_domains)
-    domain_letter = np.array([name[0] for name in input_names])
-    is_different_domain = domain_letter[:, np.newaxis] != domain_letter[np.newaxis, :]
+    # spread
+    n_items = n_domains * dd.ITEMS_PER_DOMAIN
+    #models = {'spread': norm_rdm(np.ones((n_items, n_items)))}
+    models = {'spread': np.full((n_items, n_items), 1 / n_items**2)}
     
-    return make_unit_comparison_matrix(is_different_domain)
-
-
-def get_individual_model_rdm(n_domains, snap_type='item'):
-    """
-    Make a model RDM that simply treats each item (or context) as only similar to itself.
-    """
-    n_inputs = len(_get_names_for_snapshots(snap_type, n_domains=n_domains))
-    is_different_item = ~np.eye(n_inputs, dtype=bool)
-    return make_unit_comparison_matrix(is_different_item)
-
-
-def get_model_rdm(model_type, n_domains, snap_type):
-    return {
-        'group': get_group_model_rdm,
-        'domain': get_domain_model_rdm,
-        'individual': get_individual_model_rdm
-    }[model_type](n_domains, snap_type)
-
+    # in-domain attribute distance
+    item_attr_rdm = dd.get_item_attribute_rdm(ctx_per_domain, attrs_per_context)
+    item_attr_model_1domain = center_and_norm_rdm(item_attr_rdm) / np.sqrt(n_domains)
+    models['attribute_similarity'] = block_diag(*[item_attr_model_1domain for _ in range(n_domains)])
     
+    # cross vs. within-domain
+    is_domain_eq = block_diag(*[np.ones((dd.ITEMS_PER_DOMAIN, dd.ITEMS_PER_DOMAIN), dtype=bool)
+                                for _ in range(n_domains)])
+    nz_where_domain_ne = 1 - is_domain_eq
+    models['same_vs_different_domain'] = center_and_norm_rdm(nz_where_domain_ne)
+    
+    # cross-domain group
+    is_circle = dd.item_group(np.arange(dd.ITEMS_PER_DOMAIN)) == 0
+    is_diff_group = is_circle[:, np.newaxis] != is_circle[np.newaxis, :]
+    diff_group_centered = is_diff_group - np.mean(is_diff_group)
+    diff_group_tiled = np.tile(diff_group_centered, (n_domains, n_domains))
+    diff_group_tiled[is_domain_eq] = 0  # make block diagonal zero
+    models['cross_domain_group_match'] = norm_rdm(diff_group_tiled)
+    
+#     # combination of attribute distance and cross-domain group
+#     tiled_item_attr = np.tile(item_attr_model_1domain, (n_domains, n_domains))
+#     models['attr_with_cross_domain'] = center_and_norm_rdm(models['attribute_similarity'] + (0.5 * nz_where_domain_ne) * tiled_item_attr)
+     
+    return models
+    
+
+def make_ortho_context_rsa_models(n_domains, ctx_per_domain=4, **_extra):
+    """
+    Makes a set of model RDMs for context representations. Similar to make_ortho_item_rsa_models,
+    but with only the 'spread' and 'cross_vs_in_domain' types.
+    """
+    #models = {'spread': norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
+    n_contexts = n_domains * ctx_per_domain
+    models = {'spread': np.full((n_contexts, n_contexts), 1 / n_contexts**2)}
+    
+    # cross vs. within-domain
+    is_domain_eq = block_diag(*[np.ones((ctx_per_domain, ctx_per_domain), dtype=bool)
+                                for _ in range(n_domains)])
+    nz_where_domain_ne = 1 - is_domain_eq
+    models['same_vs_different_domain'] = center_and_norm_rdm(nz_where_domain_ne)
+    
+    return models
+
+
+def test_model_validity(n_domains=4):
+    """Make sure all item and context model RDMs are pairwise orthogonal with unit norm"""
+    item_models = make_ortho_item_rsa_models(n_domains)
+    item_model_mat = np.stack([model.ravel() for model in item_models.values()], axis=1)
+    ctx_models = make_ortho_context_rsa_models(n_domains)
+    ctx_model_mat = np.stack([model.ravel() for model in ctx_models.values()], axis=1)
+    
+    if not np.allclose(item_model_mat.T @ item_model_mat, np.eye(len(item_models))):
+        print('Warning: item model RDMs are not orthogonal.')
+    else:
+        print('Item model RDMs are orthogonal.')
+    
+    if not np.allclose(np.linalg.norm(item_model_mat, axis=0), np.ones(len(item_models))):
+        print('Warning: item model RDMs do not all have unit norm.')
+    else:
+        print('Item model RDMs all have unit norm.')
+    
+    if not np.allclose(ctx_model_mat.T @ ctx_model_mat, np.eye(len(ctx_models))):
+        print('Warning: context model RDMs are not orthogonal.')
+    else:
+        print('Context model RDMs are orthogonal.')
+    
+    if not np.allclose(np.linalg.norm(ctx_model_mat, axis=0), np.ones(len(ctx_models))):
+        print('Warning: context model RDMs do not all have unit norm.')
+    else:
+        print('Context model RMDs all have unit norm.')
+
+
+def plot_rsa_model(ax, model, input_type='item'):
+    """Helper to plot model RDM with a good colormap (to show 0 entries as white)"""
+    names = _get_names_for_snapshots(input_type)
+    max_absval = np.max(np.abs(model))
+    return plot_matrix_with_labels(ax, model, names, cmap='seismic', vmin=-max_absval, vmax=max_absval)
+
+
 def get_rdm_projections(res, snap_type='item', normalize=False):
     """
     Make new "reports" (for each run, over time) of the projection of item similarity
     matrices onto the model cross-domain and domain RDM
     snap_name is the key of interest under the saved "snapshots" dict.
-    If normalize is True, normalizes the magnitude of the RDM first.
+    If normalize is True, divides RDM by the sum of entries (1-norm since they're all positive)
+    before projecting onto each model matrix except 'spread' (which is simply the mean entry).
+    'item_full' and 'context_full' are special "snap types" that combine (concatenate) all
+    snapshots with item inputs and context inputs respectively (i.e. repr and hidden layers).
     """
     # Get the full snapshots (for each run)
     with np.load(res['path'], allow_pickle=True) as resfile:
-        try:
-            snaps = resfile['snapshots'].item()[snap_type]
-        except KeyError:
-            raise ValueError(snap_type + ' snapshots not found for this dataset')
+        snap_dict = resfile['snapshots'].item()
+        if snap_type == 'item_full':
+            snaps = [snap_dict[key] for key in ['item', 'item_hidden'] if key in snap_dict]
+            snaps = np.concatenate(snaps, axis=3)
+        elif snap_type == 'context_full':
+            snaps = [snap_dict[key] for key in ['context', 'context_hidden'] if key in snap_dict]
+            snaps = np.concatenate(snaps, axis=3)
+        else:
+            try:
+                snaps = snap_dict[snap_type]
+            except KeyError:
+                raise ValueError(snap_type + ' snapshots not found for this dataset')
 
-    n_domains = res['net_params']['n_domains']
-    model_types = ['domain', 'individual']
     if 'item' in snap_type:
-        model_types.append('group')
-        
-    models = {mtype: get_model_rdm(mtype, n_domains, snap_type) for mtype in model_types}
-    
+        models = make_ortho_item_rsa_models(**res['net_params'])
+    elif 'context' in snap_type:
+        models = make_ortho_context_rsa_models(**res['net_params'])
+    else:
+        raise ValueError(f'Snapshot type {snap_type} not recognized')
+            
     n_runs, n_snap_epochs = snaps.shape[:2]
     projections = {dim: np.empty((n_runs, n_snap_epochs)) for dim in models}
     
     for k_run in range(n_runs):
         for k_epoch in range(n_snap_epochs):
-            rdm = distance.squareform(distance.pdist(snaps[k_run, k_epoch]))
-            if normalize:
-                rdm = rdm / np.linalg.norm(rdm)
+            rdm = distance.squareform(distance.pdist(snaps[k_run, k_epoch]))           
+            sum_rdm = np.sum(rdm)
             
             for dim, model in models.items():
                 projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
+                if normalize and dim != 'spread':
+                    projections[dim][k_run, k_epoch] /= sum_rdm
 
     return projections
 
 
-def get_mean_and_ci(series_set):
-    """
-    Given a set of N time series, compute and return the mean
-    along with 95% confidence interval using a t-distribution.
-    """
-    n = series_set.shape[0]
-    mean = np.mean(series_set, axis=0)
-    stderr = np.std(series_set, axis=0) / np.sqrt(n)
-    tdist = stats.t(loc=mean, scale=stderr, df=n-1)
-    interval = stats.t.interval(0.95, df=n-1, loc=mean, scale=stderr)
-    
-    return mean, interval
-
-
-def plot_rdm_projections(res, snap_type, model_types, axs, label=None, **plot_params):
+def plot_rdm_projections(res, snap_type, axs, normalize=False, label=None, **plot_params):
     """
     Plot time series of item or context RDM projections onto given axes, with 95% CI.
     model_types should be a list of the same size as axs.
-    """
+    """    
+    # get all the projections to start
+    projections = get_rdm_projections(res, snap_type, normalize=normalize)
+    model_types = projections.keys()
+    
     axs = axs.ravel()
     if len(axs) != len(model_types):
-        raise ValueError('Wrong number of axes given')
+        raise ValueError(f'Wrong number of axes given (expected {len(model_types)})')
     
-    # get all the projections to start
-    projections = get_rdm_projections(res, snap_type)
-    
-    layer = 'hidden' if 'hidden' in snap_type else 'repr'
+    layer = 'hidden' if 'hidden' in snap_type else 'all' if 'full' in snap_type else 'repr'
     input_type = 'item' if 'item' in snap_type else 'context'
     
     for ax, mtype in zip(axs, model_types):
@@ -458,6 +540,52 @@ def plot_rdm_projections(res, snap_type, model_types, axs, label=None, **plot_pa
         
         ax.plot(res['snap_epochs'], mean, label=label, **plot_params)
         ax.fill_between(res['snap_epochs'], lower, upper, **{'alpha': 0.3, **plot_params})
-        ax.set_title(f'Correlation of {input_type} RDMs in {layer} layer with {mtype} model')
         
+        ax.set_title(f'Projection of{" normalized" if normalize else ""}' + 
+                     f' {input_type} RDMs in {layer} layer onto {mtype} model')
+
+
+def make_dict_for_regression(res_array):
+    """
+    Make a dict of regressors and response variables to use to test effects of things
+    like RDM projections on things like model generalization accuracy.
+    Can be used as the 'data' parameter to patsy.dmatrices.
+    Uses all results in res_array concatenated together in time.
+    **Assumes snapshot and report epochs are the same, which is true for pretty much all my runs**
+    """
+    run_dicts = []
+    runs_with_column = {} # to figure out which columns are in each run
+    
+    for res in res_array:
+        # start with rdm projections (with full hidden layer state)
+        run_dict = {('item_' + key): proj.ravel() for key, proj in get_rdm_projections(res, snap_type='item_full').items()}
+        run_dict.update({('ctx_' + key): proj.ravel() for key, proj in get_rdm_projections(res, snap_type='context_full').items()})
+        
+        # add reports
+        with np.load(res['path'], allow_pickle=True) as resfile:
+            report_dict = resfile['reports'].item()            
+        run_dict.update({key: report.ravel() for key, report in report_dict.items() if 'etg' not in key})
+        
+        for key in run_dict:
+            if key in runs_with_column:
+                runs_with_column[key] += 1
+            else:
+                runs_with_column[key] = 1
+                
+        run_dicts.append(run_dict)
+
+    # concatenate all runs across time
+    shared_keys = [key for key, count in runs_with_column.items() if count == len(res_array)]
+    return {key: np.concatenate([run_dict[key] for run_dict in run_dicts]) for key in shared_keys}
+    
+        
+def fit_linear_model(formula, data_dict):
+    """
+    Creates a statsmodel OLS model for the R-style (patsy) formula given the
+    variables in data_dict (created with make_dict_for_regression).
+    Returns the statsmodels results object.
+    """
+    y, X = dmatrices(formula, data=data_dict, return_type='dataframe')
+    model = OLS(y, X)
+    return model.fit()
     

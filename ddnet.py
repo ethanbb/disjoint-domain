@@ -20,7 +20,8 @@ class DisjointDomainNet(nn.Module):
 
         item_mat, context_mat, attr_mat = dd.make_io_mats(
             ctx_per_domain=self.ctx_per_domain, attrs_per_context=self.attrs_per_context,
-            n_domains=self.n_domains, simplified=self.simple_item_tree)
+            n_domains=self.n_domains, clusters=self.item_clusters, 
+            last_domain_clusters=self.last_domain_item_clusters)
 
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
@@ -31,7 +32,8 @@ class DisjointDomainNet(nn.Module):
     def __init__(self, ctx_per_domain, attrs_per_context, n_domains, item_repr_units=16,
                  ctx_repr_units=16, hidden_units=32, rng_seed=None, torchfp=None,
                  device=None, merged_repr=False, use_item_repr=True, use_ctx_repr=True,
-                 simple_item_tree=False):
+                 item_clusters='4-2-2', last_domain_item_clusters=None,
+                 param_init_type='normal', param_init_scale=0.01):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
@@ -45,7 +47,8 @@ class DisjointDomainNet(nn.Module):
         self.merged_repr = merged_repr
         self.use_item_repr = use_item_repr
         self.use_ctx_repr = use_ctx_repr
-        self.simple_item_tree = simple_item_tree
+        self.item_clusters = item_clusters
+        self.last_domain_item_clusters = last_domain_item_clusters
         
         self.dummy_item = torch.zeros((1, self.n_items))
         self.dummy_ctx = torch.zeros((1, self.n_contexts))
@@ -83,42 +86,36 @@ class DisjointDomainNet(nn.Module):
         self.hidden_to_attr = nn.Linear(self.hidden_size, self.n_attributes).to(device)
 
         # make weights start small
-        with torch.no_grad():
-            for p in self.parameters():
-                nn.init.normal_(p.data, std=0.01)
-                # nn.init.uniform_(p.data, a=-0.01, b=0.01)
+        if param_init_type != 'default':
+            with torch.no_grad():
+                for p in self.parameters():
+                    if param_init_type == 'normal':
+                        nn.init.normal_(p.data, std=param_init_scale)
+                    elif param_init_type == 'uniform':
+                        nn.init.uniform_(p.data, a=-param_init_scale, b=param_init_scale)
+                    else:
+                        raise ValueError('Unrecognized param init type')
 
         # make some data
         self.x_item, self.x_context, self.y = self.gen_training_tensors()
         self.n_inputs = len(self.y)
 
         # individual item/context tensors for evaluating the network
-        self.items, self.item_names = dd.get_items(n_domains=n_domains)
-        self.contexts, self.context_names = dd.get_contexts(n_domains=n_domains, ctx_per_domain=ctx_per_domain)
+        self.items, self.item_names = dd.get_items(
+            n_domains=n_domains, item_clusters=self.item_clusters,
+            last_domain_item_clusters=self.last_domain_item_clusters)
+        self.contexts, self.context_names = dd.get_contexts(
+            n_domains=n_domains, ctx_per_domain=ctx_per_domain)
 
         self.criterion = nn.BCELoss(reduction='sum')
 
     def calc_item_repr(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
         return torch.sigmoid(self.item_to_rep(item))
-#         if not self.use_item_repr:
-#             # have to go to hidden layer to get something other than the input
-#             crep = torch.sigmoid(self.ctx_to_rep(self.dummy_ctx))
-#             repr_cat = torch.cat((irep, crep.repeat(irep.shape[0], 1)), dim=1)
-#             return torch.sigmoid(self.rep_to_hidden(repr_cat))
-        
-#         return irep
     
     def calc_context_repr(self, context):
         assert self.use_ctx_repr, 'No context representation to calculate'
         return torch.sigmoid(self.ctx_to_rep(context))
-#         if not self.use_ctx_repr:
-#             # have to go to hidden layer
-#             irep = torch.sigmoid(self.item_to_rep(self.dummy_item))
-#             repr_cat = torch.cat((irep.repeat(crep.shape[0], 1), crep), dim=1)
-#             return torch.sigmoid(self.rep_to_hidden(repr_cat))
-        
-#         return crep
 
     def calc_hidden(self, item=None, context=None):
         if item is None:
@@ -173,7 +170,7 @@ class DisjointDomainNet(nn.Module):
         if type(order) != torch.Tensor:
             order = torch.tensor(order, device='cpu', dtype=torch.long)
         
-        for batch_inds in torch.split(order, batch_size):
+        for batch_inds in torch.split(order, batch_size) if batch_size > 0 else [order]:
             optimizer.zero_grad()
             outputs = self(self.x_item[batch_inds], self.x_context[batch_inds])
             loss = self.criterion(outputs, self.y[batch_inds])
@@ -218,6 +215,16 @@ class DisjointDomainNet(nn.Module):
         train_x_inds = np.setdiff1d(np.arange(self.n_inputs), np.concatenate([test_x_item_inds, test_x_ctx_inds]))
 
         return train_item_inds, train_ctx_inds, train_x_inds, test_x_item_inds, test_x_ctx_inds
+    
+    def prepare_domain_holdout(self):
+        """Similar to prepare_holdout, but just hold out the last domain"""
+        print(f'Holding out domain {dd.domain_name(self.n_domains-1)}')
+        train_item_inds = np.arange(self.n_items - dd.ITEMS_PER_DOMAIN)
+        train_ctx_inds = np.arange(self.n_contexts - self.ctx_per_domain)
+        train_x_inds = np.arange(self.n_inputs - dd.ITEMS_PER_DOMAIN * self.ctx_per_domain)
+        test_x_inds = np.arange(len(train_x_inds), self.n_inputs)
+        
+        return train_item_inds, train_ctx_inds, train_x_inds, test_x_inds
     
     def prepare_combo_testing(self):
         """
@@ -296,7 +303,7 @@ class DisjointDomainNet(nn.Module):
         self.load_state_dict(net_state_dict)
         optimizer.load_state_dict(optim_state_dict)
 
-        etg_string = str(epochs + 1) if epochs < max_epochs else '>' + str(max_epochs)
+        etg_string = '= ' + str(epochs + 1) if epochs < max_epochs else '> ' + str(max_epochs)
         return epochs, etg_string
 
 
@@ -309,9 +316,12 @@ class DisjointDomainNet(nn.Module):
         Train the network for the specified number of epochs, etc.
         Return representation snapshots, training reports, and snapshot/report epochs.
         
+        If batch_size is negative, use one batch per epoch.
+        
         Holdout testing: train with one entire item, context, or both excluded, then
         periodically (every `reports_per_test` reports) test how many epochs are needed
         to train network up to obtaining test_thresh accuracy on the held out inputs.
+        If holdout_testing is 'domain', hold out and test on the last domain.
         
         Combo testing: For each domain, hold out one item/context pair. At each report time,
         test the accuracy of the network on the held-out items and contexts.
@@ -339,11 +349,16 @@ class DisjointDomainNet(nn.Module):
         test_x_inds = None # for combo testing
         
         if do_holdout_testing:
-            (train_item_inds, train_ctx_inds, train_x_inds,
-             test_x_item_inds, test_x_ctx_inds) = self.prepare_holdout(holdout_item, holdout_ctx)
-            # which indices to use during testing
-            included_inds_item = np.concatenate([train_x_inds, test_x_item_inds])
-            included_inds_ctx = np.concatenate([train_x_inds, test_x_ctx_inds])
+            if holdout_testing == 'domain':
+                train_item_inds, train_ctx_inds, train_x_inds, test_x_inds = self.prepare_domain_holdout()
+            else:
+                (train_item_inds, train_ctx_inds, train_x_inds,
+                 test_x_item_inds, test_x_ctx_inds) = self.prepare_holdout(holdout_item, holdout_ctx)
+                
+                # which indices to use during testing
+                included_inds_item = np.concatenate([train_x_inds, test_x_item_inds])
+                included_inds_ctx = np.concatenate([train_x_inds, test_x_ctx_inds])
+                
         elif do_combo_testing:
             train_x_inds, test_x_inds = self.prepare_combo_testing()
             
@@ -351,7 +366,7 @@ class DisjointDomainNet(nn.Module):
         train_items = self.items[train_item_inds]
         train_contexts = self.contexts[train_ctx_inds]
 
-        etg_digits = len(str(test_max_epochs)) + 1
+        etg_digits = len(str(test_max_epochs)) + 2
             
         n_inputs_train = len(train_x_inds)
 
@@ -374,6 +389,9 @@ class DisjointDomainNet(nn.Module):
             
         if holdout_ctx:
             reports['etg_context'] = np.zeros(n_etg, dtype=int)
+            
+        if holdout_testing == 'domain':
+            reports['etg_domain'] = np.zeros(n_etg, dtype=int)
         
         if do_combo_testing:
             reports['test_accuracy'] = np.zeros(n_report)
@@ -440,6 +458,14 @@ class DisjointDomainNet(nn.Module):
                         )
                         report_str += f', epochs for new context = {ctx_etg_string:>{etg_digits}}'
                         reports['etg_context'][k_test] = ctx_etg
+                        
+                    if holdout_testing == 'domain':
+                        domain_etg, domain_etg_string = self.generalize_test(
+                            batch_size, optimizer, np.arange(self.n_inputs), test_x_inds,
+                            thresh=test_thresh, max_epochs=test_max_epochs
+                        )
+                        report_str += f', epochs for new domain {domain_etg_string:>{etg_digits}}'
+                        reports['etg_domain'][k_test] = domain_etg
                         
                 if do_combo_testing:
                     with torch.no_grad():

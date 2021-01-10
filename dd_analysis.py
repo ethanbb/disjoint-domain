@@ -21,6 +21,7 @@ report_titles = {
     'weighted_acc': 'Mean accuracy (weighted)',
     'etg_item': 'Epochs to learn new items',
     'etg_context': 'Epochs to learn new contexts',
+    'etg_domain': 'Epochs to learn new domain',
     'test_accuracy': 'Accuracy on novel item/context pairs',
     'test_weighted_acc': 'Mean generalization accuracy (weighted)'
 }
@@ -68,10 +69,14 @@ def get_mean_and_ci(series_set):
     return mean, interval
 
 
-def get_result_means(res_path):
-    """Get dict of data (meaned over runs) from saved file"""
+def get_result_means(res_path, subsample_snaps=1):
+    """
+    Get dict of data (meaned over runs) from saved file
+    If subsample_snaps is > 1, use only every nth snapshot
+    """    
     with np.load(res_path, allow_pickle=True) as resfile:
         snaps = resfile['snapshots'].item()
+        snaps = {stype: snap[:, ::subsample_snaps, ...] for stype, snap in snaps.items()}
         reports = resfile['reports'].item()
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
@@ -80,6 +85,14 @@ def get_result_means(res_path):
         snap_type: get_mean_repr_dists(repr_snaps)
         for snap_type, repr_snaps in snaps.items()
     }
+    
+    # also do full item and context repr dists
+    item_full_snaps = np.concatenate([snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps],
+                                     axis=3)
+    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps)
+    ctx_full_snaps = np.concatenate([snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps],
+                                    axis=3)
+    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps)
 
     report_stats = {
         report_type: get_mean_and_ci(report)
@@ -91,7 +104,7 @@ def get_result_means(res_path):
 
     snap_epochs = dd.calc_snap_epochs(
         train_params['snap_freq'], train_params['snap_freq_scale'],
-        train_params['num_epochs'])
+        train_params['num_epochs'])[::subsample_snaps]
 
     report_epochs = np.arange(0, train_params['num_epochs'], train_params['report_freq'])
     etg_epochs = report_epochs[::train_params['reports_per_test']]
@@ -109,19 +122,22 @@ def get_result_means(res_path):
     }
 
 
-def auto_subplots(n_rows, n_cols, ax_dims=(4, 4)):
+def auto_subplots(n_rows, n_cols, ax_dims=(4, 4), prop_cycle=None):
     """Make subplots, automatically adjusting the figsize, and without squeezing"""
     figsize = (ax_dims[0] * n_cols, ax_dims[1] * n_rows)
-    return plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    for ax in axs.ravel():
+        ax.set_prop_cycle(prop_cycle)
+    return fig, axs
 
 
-def make_plot_grid(n, n_cols=3, ax_dims=(4, 4), ravel=True):
+def make_plot_grid(n, n_cols=3, ax_dims=(4, 4), ravel=True, prop_cycle=None):
     """
     Create a figure with n axes arranged in a grid, and return the fig and flat array of axes
     ax_dims is the width, height of each axes in inches (or whatever units matplotlib uses)
     """
     n_rows = (n-1) // n_cols + 1
-    fig, axs = auto_subplots(n_rows, n_cols, ax_dims=ax_dims)
+    fig, axs = auto_subplots(n_rows, n_cols, ax_dims=ax_dims, prop_cycle=prop_cycle)
     return fig, axs.ravel() if ravel else axs
 
 
@@ -134,7 +150,7 @@ def plot_report(ax, res, report_type, with_ci=True, label=None, **plot_params):
     xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
     ax.plot(xaxis, res['reports'][report_type], label=label, **plot_params)
     if with_ci:
-        ax.fill_between(xaxis, *res['report_cis'][report_type], **{'alpha': 0.3, **plot_params})
+        ax.fill_between(xaxis, *res['report_cis'][report_type], alpha=0.3)
         
     ax.set_xlabel('Epoch')
     ax.set_title(report_titles[report_type])
@@ -148,9 +164,8 @@ def plot_individual_reports(ax, res, all_reports, report_type, **plot_params):
     """
     xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
 
-    for (i, report), (col, ls) in zip(enumerate(all_reports[report_type]),
-                                      product(mcolors.TABLEAU_COLORS, ['-', '--', '-.', ':'])):
-        ax.plot(xaxis, report, color=col, linestyle=ls, label=f'Run {i+1}', **plot_params)
+    for (i, report) in enumerate(all_reports[report_type]):
+        ax.plot(xaxis, report, label=f'Run {i+1}', **plot_params)
 
     ax.set_xlabel('Epoch')
     ax.set_title(report_titles[report_type] + ' (each run)')
@@ -216,7 +231,10 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     elif item_order == 'group-outer':
         if 'item' not in snap_type:
             raise ValueError('group-outer only works for items')
-        groups_one = dd.item_group(np.arange(dd.ITEMS_PER_DOMAIN), **res['net_params'])
+        try:
+            groups_one = dd.item_group(clusters=res['net_params']['item_clusters'])
+        except KeyError:
+            groups_one = dd.item_group()
         groups = np.tile(groups_one, n_domains)
         perm = np.argsort(groups, kind='stable')
     else:
@@ -270,7 +288,10 @@ def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
     input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
     
     if 'item' in snap_type:
-        input_groups = dd.item_group(np.arange(dd.ITEMS_PER_DOMAIN), **res['net_params'])
+        try:
+            input_groups = dd.item_group(clusters=res['net_params']['item_clusters'])
+        except KeyError:
+            input_groups = dd.item_group()
     elif 'context' in snap_type:
         # No "groups," but use symbols for individual contexts (per domain) instead.
         input_groups = np.arange(4)
@@ -279,8 +300,7 @@ def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
         
     input_names = np.array(input_names).reshape((n_domains, -1))
 
-    # skip red since it conflicts with the "end of trajectory" marker
-    colors = list(filter(lambda c: c[-3:] != 'red', list(mcolors.TABLEAU_COLORS)))
+    colors = dd.get_domain_colors()
     markers = ['o', 's', '*', '^']
     for dom_reprs, dom_labels, color in zip(reprs_embedded, input_names, colors):
         for reprs, label, group in zip(dom_reprs, dom_labels, input_groups):
@@ -366,14 +386,14 @@ def center_and_norm_rdm(dist_mat):
     return norm_rdm(dist_mat_centered)
     
 
-def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50, **_extra):
+def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2', **_extra):
     """
     Makes a set of model RDMs that have unit norm and are pairwise orthogonal, and
     are hopefully useful for interpreting item representations in the DDNet.
     
     All models have zeros along the diagonal.
     
-        - 'spread'                    - Constant term for all distinct item pairs. All other models sum to 0.
+        - 'uniformity'                - Constant term for all distinct item pairs. All other models sum to 0.
         - 'attribute_similarity'      - Centered distance between item attribute vectors within each domain 
                                         (Fig. R3)  
         - 'same_vs_different_domain'  - Contrasts mean distance between domains vs. within domain
@@ -387,7 +407,7 @@ def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50
     # spread
     n_items = n_domains * dd.ITEMS_PER_DOMAIN
     #models = {'spread': norm_rdm(np.ones((n_items, n_items)))}
-    models = {'spread': np.full((n_items, n_items), 1 / n_items**2)}
+    models = {'uniformity': np.full((n_items, n_items), 1 / n_items**2)}
     
     # in-domain attribute distance
     item_attr_rdm = dd.get_item_attribute_rdm(ctx_per_domain, attrs_per_context)
@@ -401,7 +421,7 @@ def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50
     models['same_vs_different_domain'] = center_and_norm_rdm(nz_where_domain_ne)
     
     # cross-domain group
-    is_circle = dd.item_group(np.arange(dd.ITEMS_PER_DOMAIN)) == 0
+    is_circle = np.equal(dd.item_group(clusters=clusters), 0)
     is_diff_group = is_circle[:, np.newaxis] != is_circle[np.newaxis, :]
     diff_group_centered = is_diff_group - np.mean(is_diff_group)
     diff_group_tiled = np.tile(diff_group_centered, (n_domains, n_domains))
@@ -418,11 +438,11 @@ def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50
 def make_ortho_context_rsa_models(n_domains, ctx_per_domain=4, **_extra):
     """
     Makes a set of model RDMs for context representations. Similar to make_ortho_item_rsa_models,
-    but with only the 'spread' and 'cross_vs_in_domain' types.
+    but with only the 'uniformity' and 'cross_vs_in_domain' types.
     """
     #models = {'spread': norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
     n_contexts = n_domains * ctx_per_domain
-    models = {'spread': np.full((n_contexts, n_contexts), 1 / n_contexts**2)}
+    models = {'uniformity': np.full((n_contexts, n_contexts), 1 / n_contexts**2)}
     
     # cross vs. within-domain
     is_domain_eq = block_diag(*[np.ones((ctx_per_domain, ctx_per_domain), dtype=bool)
@@ -468,13 +488,14 @@ def plot_rsa_model(ax, model, input_type='item'):
     return plot_matrix_with_labels(ax, model, names, cmap='seismic', vmin=-max_absval, vmax=max_absval)
 
 
-def get_rdm_projections(res, snap_type='item', normalize=False):
+def get_rdm_projections(res, snap_type='item', normalize=True):
     """
     Make new "reports" (for each run, over time) of the projection of item similarity
     matrices onto the model cross-domain and domain RDM
     snap_name is the key of interest under the saved "snapshots" dict.
-    If normalize is True, divides RDM by the sum of entries (1-norm since they're all positive)
-    before projecting onto each model matrix except 'spread' (which is simply the mean entry).
+    Also includes 'spread' which is just the fro-norm of the RDM.
+    If normalize is True, normalizes each RDM
+    before projecting onto each model matrix.
     'item_full' and 'context_full' are special "snap types" that combine (concatenate) all
     snapshots with item inputs and context inputs respectively (i.e. repr and hidden layers).
     """
@@ -502,16 +523,21 @@ def get_rdm_projections(res, snap_type='item', normalize=False):
             
     n_runs, n_snap_epochs = snaps.shape[:2]
     projections = {dim: np.empty((n_runs, n_snap_epochs)) for dim in models}
+    projections['spread'] = np.empty((n_runs, n_snap_epochs))
     
     for k_run in range(n_runs):
         for k_epoch in range(n_snap_epochs):
-            rdm = distance.squareform(distance.pdist(snaps[k_run, k_epoch]))           
-            sum_rdm = np.sum(rdm)
+            rdm = distance.squareform(distance.pdist(snaps[k_run, k_epoch]))
+            
+            # make special "spread" one which is the fro norm
+            normed_rdm = np.linalg.norm(rdm)
+            projections['spread'][k_run, k_epoch] = normed_rdm
+            
+            if normalize:
+                rdm /= normed_rdm
             
             for dim, model in models.items():
                 projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
-                if normalize and dim != 'spread':
-                    projections[dim][k_run, k_epoch] /= sum_rdm
 
     return projections
 
@@ -529,7 +555,7 @@ def plot_rdm_projections(res, snap_type, axs, normalize=False, label=None, **plo
     if len(axs) != len(model_types):
         raise ValueError(f'Wrong number of axes given (expected {len(model_types)})')
     
-    layer = 'hidden' if 'hidden' in snap_type else 'all' if 'full' in snap_type else 'repr'
+    layer = 'hidden layer' if 'hidden' in snap_type else 'all layers' if 'full' in snap_type else 'repr layer'
     input_type = 'item' if 'item' in snap_type else 'context'
     
     for ax, mtype in zip(axs, model_types):
@@ -542,7 +568,7 @@ def plot_rdm_projections(res, snap_type, axs, normalize=False, label=None, **plo
         ax.fill_between(res['snap_epochs'], lower, upper, **{'alpha': 0.3, **plot_params})
         
         ax.set_title(f'Projection of{" normalized" if normalize else ""}' + 
-                     f' {input_type} RDMs in {layer} layer onto {mtype} model')
+                     f' {input_type} RDMs in {layer} onto {mtype} model')
 
 
 def make_dict_for_regression(res_array):
@@ -585,7 +611,6 @@ def fit_linear_model(formula, data_dict):
     variables in data_dict (created with make_dict_for_regression).
     Returns the statsmodels results object.
     """
-    y, X = dmatrices(formula, data=data_dict, return_type='dataframe')
-    model = OLS(y, X)
+    y, x = dmatrices(formula, data=data_dict, return_type='dataframe')
+    model = OLS(y, x)
     return model.fit()
-    

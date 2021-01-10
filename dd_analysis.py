@@ -212,7 +212,6 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     array to use a custom permutation.
         'domain-outer' (default): items are grouped together by domain
         'domain-inner': first item of each domain, then second item, etc.
-        'group-outer': sorted by group (circles/squares/stars), then by domain
     If 'rsa_mat' is provided, overrides the matrix to plot.
     """
     input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
@@ -227,16 +226,6 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     elif item_order == 'domain-inner':
         inds = np.reshape(np.arange(n_inputs, dtype=int), (n_domains, -1))    
         perm = inds.T.ravel()
-
-    elif item_order == 'group-outer':
-        if 'item' not in snap_type:
-            raise ValueError('group-outer only works for items')
-        try:
-            groups_one = dd.item_group(clusters=res['net_params']['item_clusters'])
-        except KeyError:
-            groups_one = dd.item_group()
-        groups = np.tile(groups_one, n_domains)
-        perm = np.argsort(groups, kind='stable')
     else:
         perm = item_order
 
@@ -288,9 +277,11 @@ def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
     input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
     
     if 'item' in snap_type:
-        try:
+        if 'item_clusters' in res['net_params']:
             input_groups = dd.item_group(clusters=res['net_params']['item_clusters'])
-        except KeyError:
+        elif 'cluster_info' in res['net_params']:
+            input_groups = dd.item_group(clusters=res['net_params']['cluster_info'])
+        else:
             input_groups = dd.item_group()
     elif 'context' in snap_type:
         # No "groups," but use symbols for individual contexts (per domain) instead.

@@ -20,8 +20,8 @@ class DisjointDomainNet(nn.Module):
 
         item_mat, context_mat, attr_mat = dd.make_io_mats(
             ctx_per_domain=self.ctx_per_domain, attrs_per_context=self.attrs_per_context,
-            n_domains=self.n_domains, clusters=self.item_clusters, 
-            last_domain_clusters=self.last_domain_item_clusters)
+            n_domains=self.n_domains, cluster_info=self.cluster_info, 
+            last_domain_cluster_info=self.last_domain_cluster_info)
 
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
@@ -32,7 +32,7 @@ class DisjointDomainNet(nn.Module):
     def __init__(self, ctx_per_domain, attrs_per_context, n_domains, item_repr_units=16,
                  ctx_repr_units=16, hidden_units=32, rng_seed=None, torchfp=None,
                  device=None, merged_repr=False, use_item_repr=True, use_ctx_repr=True,
-                 item_clusters='4-2-2', last_domain_item_clusters=None,
+                 cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01):
         super(DisjointDomainNet, self).__init__()
         
@@ -47,8 +47,8 @@ class DisjointDomainNet(nn.Module):
         self.merged_repr = merged_repr
         self.use_item_repr = use_item_repr
         self.use_ctx_repr = use_ctx_repr
-        self.item_clusters = item_clusters
-        self.last_domain_item_clusters = last_domain_item_clusters
+        self.cluster_info = cluster_info
+        self.last_domain_cluster_info = last_domain_cluster_info
         
         self.dummy_item = torch.zeros((1, self.n_items))
         self.dummy_ctx = torch.zeros((1, self.n_contexts))
@@ -102,8 +102,8 @@ class DisjointDomainNet(nn.Module):
 
         # individual item/context tensors for evaluating the network
         self.items, self.item_names = dd.get_items(
-            n_domains=n_domains, item_clusters=self.item_clusters,
-            last_domain_item_clusters=self.last_domain_item_clusters)
+            n_domains=n_domains, cluster_info=self.cluster_info,
+            last_domain_cluster_info=self.last_domain_cluster_info)
         self.contexts, self.context_names = dd.get_contexts(
             n_domains=n_domains, ctx_per_domain=ctx_per_domain)
 

@@ -30,6 +30,15 @@ def choose_k_set_bits(a, k=1):
     return choose_k(np.flatnonzero(a), k)
 
 
+def get_cluster_sizes(clusters):
+    """Parse a 'clusters' string such as '4-2-2_suffix' to get the size of each cluster"""
+    sizes = [int(sz) for sz in clusters.partition('_')[0].split('-')]
+    if sum(sizes) != ITEMS_PER_DOMAIN:
+        raise ValueError('Invalid clusters specification')
+    
+    return sizes
+
+
 def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
     """
     Useful for making 'circles' and similar structures in other attr cluster settings
@@ -52,7 +61,7 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
     return similar_vecs
 
 
-def _make_clustered_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2'):
+def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2', **_extra):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
@@ -61,14 +70,15 @@ def _make_clustered_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2
     attrs_per_context must be at least 50 (approximately) in order for the distances to be correct.
     Each vector has 25 attributes activated within the current context, so that cross-context distances are sqrt(50).
     
-    clusters: how the items should be divided into clusters with more similar attributes. Should be one 
-    of these presets: '4-2-2' (i.e. circles-squares-stars, in the original paper), '4-4', '3-3-2', or '5-1-2'.
-    '4-4' was originally intended to test whether the network is picking
-    up some higher-level property of the circles ("typicality") or just using the representation layer to make
-    the most useful split of the items in each domain.
+    clust_sizes: 3-item list of # of circles, squares, and stars. Currently # of stars must be 2.
     """
     if attrs_per_context < 50:
         raise ValueError('Need >= 50 attrs for standard attribute vecs')
+    
+    clust_sizes = get_cluster_sizes(clusters)
+    if len(clust_sizes) != 3 or clust_sizes[2] != 2:
+        raise ValueError('Invalid clust_sizes')
+    n_circles, n_squares, _ = clust_sizes
 
     attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
 
@@ -81,25 +91,18 @@ def _make_clustered_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2
         circ_centroid[circ_centroid_set] = 1
 
         # now choose 2 distinct bits to flip for each of the 'circle' vectors, keeping total # set = 25
-        n_circles = int(clusters[0])
         attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, 4)
 
         # pick centroid for other items, which should be 40 bits away from this centroid.
         other_centroid = circ_centroid.copy()
         other_centroid[choose_k(circ_centroid_unset, 20)] = 1
         other_centroid[choose_k(circ_centroid_set, 20)] = 0
-        
-        if clusters == '4-4':
-            # proceed as in the circle centroid to make 4 "squares"
-            attr_mat[4:] = _make_n_dist_d_attr_vecs(other_centroid, 4, 4)
-            continue
 
         # now square and star centroids, which are centered on other_centroid and differ by 12 bits
         square_centroid, star_centroid = _make_n_dist_d_attr_vecs(other_centroid, 2, 12)
 
         # squares differ by just 2 bits. be a little imprecise and let one of them be the centroid.
         attr_mat[n_circles:6, :] = square_centroid
-        n_squares = 6 - n_circles
         sq_set_bits = choose_k_set_bits(1-square_centroid, n_squares-1)
         sq_unset_bits = choose_k_set_bits(square_centroid, n_squares-1)
         for attr_vec, set_bit, unset_bit in zip(attr_mat[n_circles+1:6], sq_set_bits, sq_unset_bits):
@@ -121,134 +124,55 @@ def _make_clustered_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2
     return attrs
 
 
-def _make_simplified_attr_vecs_no_reuse(ctx_per_domain, attrs_per_context):
+def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
+                            intragroup_dists=[4, 12], intergroup_dist=40):
+    """
+    Make attribute vectors with 2 clusters in a systematic way. All distances are Hamming and
+    should be divisible by 4 (2 in the case of intergroup)
+    """
+    clust_sizes = get_cluster_sizes(clusters)
+    max_disjoint_bits = max(ATTRS_SET_PER_ITEM, attrs_per_context - ATTRS_SET_PER_ITEM)
+    
+    # Validate everything first
+    if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
+        raise ValueError(f'Invalid intergroup distance - must be even and <= {max_disjoint_bits * 2}')
+    
+    if any([dist % 4 != 0 for dist in intragroup_dists]):
+        raise ValueError('Invalid intragroup distances - must all be multiples of 4')
+    if any([dist // 4 * n > max_disjoint_bits for dist, n in zip(intragroup_dists, clust_sizes)]):
+        raise ValueError('Not enough attributes per cluster for these sizes and intragroup distances')
+    
     attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-
+        
     for attr_mat in attrs:
         circ_centroid = np.zeros(attrs_per_context)
         circ_centroid_set = choose_k(np.arange(attrs_per_context), ATTRS_SET_PER_ITEM)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
         
-        attr_mat[...] = circ_centroid
+        # make cirlces
+        n_circles, n_squares = clust_sizes
+        circ_dists, square_dists = intragroup_dists
+        attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, circ_dists)
         
-        for ind_set, val in zip([circ_centroid_set, circ_centroid_unset], [0, 1]):
-            # pick bits to flip all at once
-            other_centroid_bits = 17
-            within_centroid_bits_per_item = 1
-            within_centroid_bits = within_centroid_bits_per_item * ITEMS_PER_DOMAIN
-            
-            flip_inds = choose_k(ind_set, other_centroid_bits + within_centroid_bits)
-            other_centroid_inds, within_centroid_inds = np.split(flip_inds, [other_centroid_bits])
-            within_centroid_inds_per_item = np.split(within_centroid_inds, ITEMS_PER_DOMAIN)
-            
-            attr_mat[4:, other_centroid_inds] = val
-            for attr_vec, inds in zip(attr_mat, within_centroid_inds_per_item):
-                attr_vec[inds] = val
-            
-    return attrs
-
-
-def _make_simplified_unequal_attr_vecs(ctx_per_domain, attrs_per_context):
-    if attrs_per_context != 60:
-        raise ValueError('Attributes per context must be 60')
+        # make square centroid
+        square_centroid = circ_centroid.copy()
+        square_centroid[choose_k(circ_centroid_unset, intergroup_dist // 2)] = 1
+        square_centroid[choose_k(circ_centroid_set, intergroup_dist // 2)] = 0
         
-    attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-        
-    for attr_mat in attrs:
-        square_centroid = np.zeros(attrs_per_context)
-        square_centroid_set = choose_k(np.arange(attrs_per_context), 30)
-        square_centroid_unset = np.setdiff1d(range(attrs_per_context), square_centroid_set, assume_unique=True)
-        square_centroid[square_centroid_set] = 1
-        
-        attr_mat[...] = square_centroid
-        
-        for ind_set, val in zip([square_centroid_set, square_centroid_unset], [0, 1]):
-            # pick bits to flip all at once
-            other_centroid_bits = 20
-            circle_bits_per_item = 1
-            circle_bits = circle_bits_per_item * 4
-            square_extra_bits_per_item = 1
-            square_extra_bits = square_extra_bits_per_item * 4
-            square_bits_from_other_centroid = 2
-            
-            flip_inds = choose_k(ind_set, other_centroid_bits + circle_bits + square_extra_bits)
-            other_centroid_inds, flip_inds = np.split(flip_inds, [other_centroid_bits])
-            circle_inds, square_extra_inds = np.split(flip_inds, [circle_bits])
-            circle_inds_each = np.split(circle_inds, 4)
-            square_extra_inds_each = np.split(square_extra_inds, 4)
-            square_inds_from_other_centroid = choose_k(other_centroid_inds, square_bits_from_other_centroid * 4)
-            square_inds_from_other_each = np.split(square_inds_from_other_centroid, 4)
-            
-            attr_mat[:4, other_centroid_inds] = val
-            
-            for attr_vec, inds in zip(attr_mat[:4], circle_inds_each):
-                attr_vec[inds] = val
-                
-            for attr_vec, inds1, inds2 in zip(attr_mat[4:], square_inds_from_other_each, square_extra_inds_each):
-                attr_vec[inds1] = val
-                attr_vec[inds2] = val
-            
-    return attrs
-
-
-def _make_originalish_attr_vecs_no_reuse(ctx_per_domain, attrs_per_context):
-    if attrs_per_context < 60:
-        raise ValueError('Must have at least 60 attributes for this attribute setting')
-        
-    attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-
-    for attr_mat in attrs:
-        circ_centroid = np.zeros(attrs_per_context)
-        circ_centroid_set = choose_k(np.arange(attrs_per_context), 30)
-        circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
-        circ_centroid[circ_centroid_set] = 1
-        
-        attr_mat[...] = circ_centroid
-        
-        for ind_set, val in zip([circ_centroid_set, circ_centroid_unset], [0, 1]):
-            # pick bits to flip all at once
-            other_centroid_bits = 15
-            circle_bits_per_item = 1
-            circle_bits = circle_bits_per_item * 4
-            square_vs_star_bits = 6
-            square_bits = 1
-            star_bits_per_item = 2
-            star_bits = star_bits_per_item * 2
-            
-            flip_inds = choose_k(ind_set, other_centroid_bits + circle_bits + square_vs_star_bits + square_bits + star_bits)
-            other_centroid_inds, flip_inds = np.split(flip_inds, [other_centroid_bits])
-            circle_inds, flip_inds = np.split(flip_inds, [circle_bits])
-            circle_inds_each = np.split(circle_inds, 4)
-            square_vs_star_inds, flip_inds = np.split(flip_inds, [square_vs_star_bits])
-            square_centroid_inds, star_centroid_inds = np.split(square_vs_star_inds, 2)
-            square_inds, star_inds = np.split(flip_inds, [square_bits])
-            square_inds_each = [square_inds, []]
-            star_inds_each = np.split(star_inds, 2)
-            
-            # Now flip all the bits
-            for attr_vec, inds in zip(attr_mat[:4], circle_inds_each):
-                attr_vec[inds] = val
-                
-            attr_mat[4:, other_centroid_inds] = val
-            attr_mat[4:6, square_centroid_inds] = val
-            attr_mat[6:, star_centroid_inds] = val
-            
-            for attr_vec, inds in zip(attr_mat[4:6], square_inds_each):
-                attr_vec[inds] = val
-            
-            for attr_vec, inds in zip(attr_mat[6:], star_inds_each):
-                attr_vec[inds] = val
+        # make squares
+        attr_mat[n_circles:] = _make_n_dist_d_attr_vecs(square_centroid, n_squares, square_dists)
         
     return attrs
+    
 
-
-def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, dist):
+def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_dists=[10], **_extra):
     """
     Make attribute vectors that are all equidistant from each other with Hamming distance `dist`. 
     attrs_per_context must be at least ATTRS_SET_PER_ITEM + (dist/2) * (ITEMS_PER_DOMAIN-1)
     (by default, at least 60). Also, dist must be even.
     """
+    dist = intragroup_dists[0]
     if dist % 2 != 0:
         raise ValueError('dist must be even')
     half_dist = dist // 2
@@ -274,27 +198,42 @@ def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, dist):
     
     return attrs
     
-
-def make_attr_vecs(ctx_per_domain, attrs_per_context, clusters, eq_dist=10):
-    """Wrapper to make any set of attr vectors (returns a list of one matrix per context)"""
-    if clusters == '8':
-        return _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, eq_dist)
-    elif clusters == '4-4_no_reuse':
-        return _make_simplified_attr_vecs_no_reuse(ctx_per_domain, attrs_per_context)
-    elif clusters == '4-4_unequal':
-        return _make_simplified_unequal_attr_vecs(ctx_per_domain, attrs_per_context)
-    elif clusters == '4-2-2_no_reuse':
-        return _make_originalish_attr_vecs_no_reuse(ctx_per_domain, attrs_per_context)
-    else:
-        return _make_clustered_attr_vecs(ctx_per_domain, attrs_per_context, clusters)
     
+def normalize_cluster_info(cluster_info):
+    """
+    Get a dict that specifies information about the attribute clusters.
+    Input is either a string (equivalent to {'clusters': cluster_info}) or
+    a dict with keys 'clusters', 'intragroup_dists', and 'intergroup_dist'.
+    The latter two keys are optional and default to None.
+    """
+    if isinstance(cluster_info, str):
+        return {'clusters': cluster_info}
+    return cluster_info
+    
+
+def make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info):
+    """Wrapper to make any set of attr vectors (returns a list of one matrix per context)"""
+    cluster_info = normalize_cluster_info(cluster_info)
+    n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
+    
+    try:
+        attr_vec_fn = {
+            1: _make_equidistant_attr_vecs,
+            2: _make_2_group_attr_vecs,
+            3: _make_3_group_attr_vecs
+        }[n_clusts]
+    except KeyError:
+        raise ValueError('Invalid clusters specification')
+        
+    return attr_vec_fn(ctx_per_domain, attrs_per_context, **cluster_info)
+
     
 def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4, 
-                 clusters='4-2-2', last_domain_clusters=None):
+                 cluster_info='4-2-2', last_domain_cluster_info=None):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
-    clusters and last_domain_clusters can be '4-2-2', '4-4', '3-3-2' or '8' (equidistant)
+    Cluster_info and last_domain_cluster_info should be valid inputs to normalize_cluster_info.
     By default (when None), last_domain_clusters is the same as clusters.
     """
 
@@ -306,22 +245,25 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4,
     context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
     
     # New behavior: generate a new set of attr vecs for each domain.
-    if last_domain_clusters is None:
-        last_domain_clusters = clusters
+    if last_domain_cluster_info is None:
+        last_domain_cluster_info = cluster_info
+    
+    cluster_info = normalize_cluster_info(cluster_info)
+    last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
         
-    domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context, clusters)
+    domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info)
                     for _ in range(n_domains - 1)]
-    domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context, last_domain_clusters))
+    domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context, last_domain_cluster_info))
     attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
 
     return item_mat, context_mat, attr_mat
 
 
-def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2'):
+def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
     item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, n_domains=1,
-                                                   clusters=clusters)
+                                                   cluster_info=cluster_info)
 
     fig = plt.figure()
 
@@ -347,18 +289,18 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2
     ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
 
-def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2'):
+def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
     
-    attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, clusters)
+    attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info)
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
     return distance.squareform(mean_dist)
 
     
-def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2'):
+def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
-    dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context, clusters)
+    dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context, cluster_info)
     condensed_dist = distance.squareform(dist_mat)
     
     fig, ax = plt.subplots()
@@ -400,13 +342,17 @@ def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
 
 def item_group(n=slice(None), clusters='4-2-2', **_extra):
     """Equivalent of circle/square/star, to identify 'types' of items"""
-    cluster_sizes = [int(s) for s in clusters.partition('_')[0].split('-')]
+    if isinstance(clusters, dict):
+        clusters = clusters['clusters']
+    cluster_sizes = get_cluster_sizes(clusters)
     groups = [i for i, ksize in enumerate(cluster_sizes) for _ in range(ksize)]
     return groups[n]
 
 
 def item_group_symbol(n, clusters='4-2-2'):
-    if clusters == '8':
+    if isinstance(clusters, dict):
+        clusters = clusters['clusters']
+    if len(get_cluster_sizes(clusters)) == 1:
         return ''
     symbol_array = np.array(['*', '@', '$'])
     return symbol_array[item_group(n, clusters)]
@@ -427,14 +373,19 @@ def get_domain_colors():
     ]
 
 
-def get_items(n_domains=4, item_clusters='4-2-2', last_domain_item_clusters=None, **_extra):
+def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
+    cluster_info = normalize_cluster_info(cluster_info)
+    last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
+                                else normalize_cluster_info(last_domain_cluster_info))
+    
     items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
-    all_clusters = [item_clusters] * n_domains
-    if last_domain_item_clusters is not None:
-        all_clusters[-1] = last_domain_item_clusters
+    all_clusters = [cluster_info['clusters']] * n_domains
+    if last_domain_cluster_info is not None:
+        last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
+        all_clusters[-1] = last_domain_cluster_info['clusters']
         
-    item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, item_clusters)
+    item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, clst)
                   for d, clst in enumerate(all_clusters)
                   for n in range(ITEMS_PER_DOMAIN)]
     return items, item_names

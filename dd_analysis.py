@@ -69,17 +69,21 @@ def get_mean_and_ci(series_set):
     return mean, interval
 
 
-def get_result_means(res_path, subsample_snaps=1):
+def get_result_means(res_path, subsample_snaps=1, runs=slice(None)):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
+    Indexes into runs using the 'runs' argument
     """    
     with np.load(res_path, allow_pickle=True) as resfile:
         snaps = resfile['snapshots'].item()
-        snaps = {stype: snap[:, ::subsample_snaps, ...] for stype, snap in snaps.items()}
         reports = resfile['reports'].item()
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
+        
+    # take subset of snaps and reports if necessary
+    snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
+    reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
 
     mean_repr_dists = {
         snap_type: get_mean_repr_dists(repr_snaps)

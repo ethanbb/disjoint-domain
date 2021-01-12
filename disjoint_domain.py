@@ -311,6 +311,7 @@ def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, clust
     ax.set_title('Item attribute similarities, collapsed across contexts')
     ax.set_xlabel('Euclidean distance')
     ax.set_ylabel('Input #')
+    return fig, ax
 
 
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):

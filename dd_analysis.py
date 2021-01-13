@@ -27,7 +27,7 @@ report_titles = {
 }
 
 
-def get_mean_repr_dists(repr_snaps, metric='euclidean'):
+def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
     """
     Make distance matries (RSAs) of given representations of items or contexts,
     averaged over training runs.
@@ -43,17 +43,32 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean'):
     recorded epoch. This is the n_inputs x n_inputs block diagonal of dists_all, stacked.
     """
 
-    n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape
-    snaps_flat = np.reshape(repr_snaps, (n_runs, n_snap_epochs * n_inputs, n_rep))
-    dists_all = np.stack([distance.pdist(run_snaps, metric=metric) for run_snaps in snaps_flat])
-    mean_dists_all = distance.squareform(np.nanmean(dists_all, axis=0))
+    if metric == 'spearman':
+        dist_fn = lambda snaps: 1 - stats.spearmanr(snaps, axis=1)[0]
+    else:
+        dist_fn = lambda snaps: distance.squareform(distance.pdist(snaps, metric=metric))
+    
+    if calc_all:
+        n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape
+        snaps_flat = np.reshape(repr_snaps, (n_runs, n_snap_epochs * n_inputs, n_rep))        
+        dists_all = np.stack([dist_fn(run_snaps) for run_snaps in snaps_flat])
+        mean_dists_all = np.nanmean(dists_all, axis=0)
 
-    mean_dists_snaps = np.empty((n_snap_epochs, n_inputs, n_inputs))
-    for k_epoch in range(n_snap_epochs):
-        this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
-        mean_dists_snaps[k_epoch] = mean_dists_all[this_slice, this_slice]
-
-    return {'all': mean_dists_all, 'snaps': mean_dists_snaps}
+        mean_dists_snaps = np.empty((n_snap_epochs, n_inputs, n_inputs))
+        for k_epoch in range(n_snap_epochs):
+            this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
+            mean_dists_snaps[k_epoch] = mean_dists_all[this_slice, this_slice]
+            
+        return {'all': mean_dists_all, 'snaps': mean_dists_snaps}
+            
+    else:
+        # Directly calculate distances at each epoch
+        dists_snaps = np.stack([
+            np.stack([dist_fn(epoch_snaps) for epoch_snaps in run_snaps])
+            for run_snaps in repr_snaps
+        ])
+        mean_dists_snaps = np.nanmean(dists_snaps, axis=0)
+        return {'snaps': mean_dists_snaps}
 
 
 def get_mean_and_ci(series_set):
@@ -69,7 +84,8 @@ def get_mean_and_ci(series_set):
     return mean, interval
 
 
-def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean'):
+def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
+                     dist_metric='euclidean', calc_all_repr_dists=True):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -86,17 +102,17 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
 
     mean_repr_dists = {
-        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric)
+        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
         for snap_type, repr_snaps in snaps.items()
     }
     
     # also do full item and context repr dists
     item_full_snaps = np.concatenate([snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps],
                                      axis=3)
-    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric)
+    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
     ctx_full_snaps = np.concatenate([snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps],
                                     axis=3)
-    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric)
+    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
 
     report_stats = {
         report_type: get_mean_and_ci(report)

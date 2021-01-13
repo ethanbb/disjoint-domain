@@ -87,12 +87,12 @@ class DisjointDomainNet(nn.Module):
         self.item_to_rep = (nn.Linear(self.n_items, self.item_repr_size, bias=False).to(device)
                             if self.use_item_repr else nn.Identity())
         self.item_rep_bias = (make_bias(self.item_repr_size)
-                                 if self.use_item_repr else torch.zeros((self.item_repr_size,)))
+                                 if self.use_item_repr else torch.zeros((self.n_items,)))
         
         self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size, bias=False).to(device)
                            if self.use_ctx_repr else nn.Identity())
         self.ctx_rep_bias = (make_bias(self.ctx_repr_size)
-                                if self.use_ctx_repr else torch.zeros((self.ctx_repr_size,)))
+                                if self.use_ctx_repr else torch.zeros((self.n_contexts,)))
         
         self.rep_to_hidden = nn.Linear(self.repr_size, self.hidden_size, bias=False).to(device)
         self.hidden_bias = make_bias(self.hidden_size)

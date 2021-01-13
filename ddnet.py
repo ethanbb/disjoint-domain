@@ -33,7 +33,7 @@ class DisjointDomainNet(nn.Module):
                  ctx_repr_units=16, hidden_units=32, rng_seed=None, torchfp=None,
                  device=None, merged_repr=False, use_item_repr=True, use_ctx_repr=True,
                  cluster_info='4-2-2', last_domain_cluster_info=None,
-                 param_init_type='normal', param_init_scale=0.01):
+                 param_init_type='normal', param_init_scale=0.01, fix_biases=False):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
@@ -76,14 +76,28 @@ class DisjointDomainNet(nn.Module):
             if not self.use_ctx_repr:
                 self.repr_size += self.n_contexts - ctx_repr_units
         
-        # define layers
-        self.item_to_rep = (nn.Linear(self.n_items, self.item_repr_size).to(device)
-                            if self.use_item_repr else nn.Identity())
-        self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size).to(device)
-                           if self.use_ctx_repr else nn.Identity())
+        def make_bias(n_units):
+            """Make bias for a layer, either a constant or trainable parameter"""
+            if fix_biases:
+                return torch.full((n_units,), -2., device=device)
+            else:
+                return nn.Parameter(torch.empty((n_units,), device=device))
         
-        self.rep_to_hidden = nn.Linear(self.repr_size, self.hidden_size).to(device)        
-        self.hidden_to_attr = nn.Linear(self.hidden_size, self.n_attributes).to(device)
+        # define layers
+        self.item_to_rep = (nn.Linear(self.n_items, self.item_repr_size, bias=False).to(device)
+                            if self.use_item_repr else nn.Identity())
+        self.item_rep_bias = (make_bias(self.item_repr_size)
+                                 if self.use_item_repr else torch.zeros((self.item_repr_size,)))
+        
+        self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size, bias=False).to(device)
+                           if self.use_ctx_repr else nn.Identity())
+        self.ctx_rep_bias = (make_bias(self.ctx_repr_size)
+                                if self.use_ctx_repr else torch.zeros((self.ctx_repr_size,)))
+        
+        self.rep_to_hidden = nn.Linear(self.repr_size, self.hidden_size, bias=False).to(device)
+        self.hidden_bias = make_bias(self.hidden_size)
+        self.hidden_to_attr = nn.Linear(self.hidden_size, self.n_attributes, bias=False).to(device)
+        self.attr_bias = make_bias(self.n_attributes)
 
         # make weights start small
         if param_init_type != 'default':
@@ -111,11 +125,11 @@ class DisjointDomainNet(nn.Module):
 
     def calc_item_repr(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
-        return torch.sigmoid(self.item_to_rep(item))
+        return torch.sigmoid(self.item_to_rep(item) + self.item_rep_bias)
     
     def calc_context_repr(self, context):
         assert self.use_ctx_repr, 'No context representation to calculate'
-        return torch.sigmoid(self.ctx_to_rep(context))
+        return torch.sigmoid(self.ctx_to_rep(context) + self.ctx_rep_bias)
 
     def calc_hidden(self, item=None, context=None):
         if item is None:
@@ -123,19 +137,19 @@ class DisjointDomainNet(nn.Module):
         if context is None:
             context = self.dummy_ctx.repeat(item.shape[0], 1)
             
-        irep = self.item_to_rep(item)
-        crep = self.ctx_to_rep(context)
+        irep = self.item_to_rep(item) + self.item_rep_bias
+        crep = self.ctx_to_rep(context) + self.ctx_rep_bias
 
         if self.merged_repr:
             rep = irep + crep
         else:
             rep = torch.cat((irep, crep), dim=1)
         rep = torch.sigmoid(rep)
-        return torch.sigmoid(self.rep_to_hidden(rep))
+        return torch.sigmoid(self.rep_to_hidden(rep) + self.hidden_bias)
 
     def forward(self, item, context):
         hidden = self.calc_hidden(item, context)
-        attr = torch.sigmoid(self.hidden_to_attr(hidden))        
+        attr = torch.sigmoid(self.hidden_to_attr(hidden) + self.attr_bias)
         return attr
 
     def b_outputs_correct(self, outputs, batch_inds):

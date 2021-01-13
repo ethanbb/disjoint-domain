@@ -316,13 +316,15 @@ def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, clust
 
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
     """Establish floating-point type and device to use with PyTorch"""
-
+    
     if device is None:
         if use_cuda_if_possible and torch.cuda.is_available():
             device = torch.device('cuda')
         else:
             device = torch.device('cpu')
-
+    else:
+        device = torch.device(device)
+            
     if device.type == 'cuda':
         ttype_ns = torch.cuda
     else:

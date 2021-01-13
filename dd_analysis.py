@@ -27,7 +27,7 @@ report_titles = {
 }
 
 
-def get_mean_repr_dists(repr_snaps):
+def get_mean_repr_dists(repr_snaps, metric='euclidean'):
     """
     Make distance matries (RSAs) of given representations of items or contexts,
     averaged over training runs.
@@ -45,7 +45,7 @@ def get_mean_repr_dists(repr_snaps):
 
     n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape
     snaps_flat = np.reshape(repr_snaps, (n_runs, n_snap_epochs * n_inputs, n_rep))
-    dists_all = np.stack([distance.pdist(run_snaps) for run_snaps in snaps_flat])
+    dists_all = np.stack([distance.pdist(run_snaps, metric=metric) for run_snaps in snaps_flat])
     mean_dists_all = distance.squareform(np.nanmean(dists_all, axis=0))
 
     mean_dists_snaps = np.empty((n_snap_epochs, n_inputs, n_inputs))
@@ -69,7 +69,7 @@ def get_mean_and_ci(series_set):
     return mean, interval
 
 
-def get_result_means(res_path, subsample_snaps=1, runs=slice(None)):
+def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean'):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -86,17 +86,17 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None)):
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
 
     mean_repr_dists = {
-        snap_type: get_mean_repr_dists(repr_snaps)
+        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric)
         for snap_type, repr_snaps in snaps.items()
     }
     
     # also do full item and context repr dists
     item_full_snaps = np.concatenate([snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps],
                                      axis=3)
-    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps)
+    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric)
     ctx_full_snaps = np.concatenate([snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps],
                                     axis=3)
-    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps)
+    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric)
 
     report_stats = {
         report_type: get_mean_and_ci(report)

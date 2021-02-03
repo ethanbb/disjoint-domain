@@ -3,6 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D # noqa
+from mpl_toolkits import axes_grid1
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 from scipy.linalg import block_diag
@@ -25,7 +26,8 @@ report_titles = {
 }
 
 
-def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
+def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
+                        include_individual=False):
     """
     Make distance matries (RSAs) of given representations of items or contexts,
     averaged over training runs.
@@ -39,6 +41,11 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
 
     'snaps': gives the mean distsances between items or contexts at each
     recorded epoch. This is the n_inputs x n_inputs block diagonal of dists_all, stacked.
+    
+    If calc_all is False, only computes the distances within each epoch. (Distances across
+    epochs are generally only used to make an MDS plot.)
+    
+    If include_individual is True, includes snaps_each which is not meaned across runs.
     """
 
     def dist_fn(snaps):
@@ -58,7 +65,17 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
             this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
             mean_dists_snaps[k_epoch] = mean_dists_all[this_slice, this_slice]
             
-        return {'all': mean_dists_all, 'snaps': mean_dists_snaps}
+        dists_out = {'all': mean_dists_all, 'snaps': mean_dists_snaps}
+        
+        if include_individual:
+            dists_snaps = np.empty((n_runs, n_snap_epochs, n_inputs, n_inputs))
+            for k_epoch in range(n_snap_epochs):
+                this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
+                dists_snaps[:, k_epoch] = dists_all[:, this_slice, this_slice]
+
+            dists_out['snaps_each'] = dists_snaps
+            
+        return dists_out
             
     else:
         # Directly calculate distances at each epoch
@@ -67,7 +84,11 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
             for run_snaps in repr_snaps
         ])
         mean_dists_snaps = np.nanmean(dists_snaps, axis=0)
-        return {'snaps': mean_dists_snaps}
+        
+        if include_individual:
+            return {'snaps': mean_dists_snaps, 'snaps_each': dists_snaps}
+        else:
+            return {'snaps': mean_dists_snaps}
 
 
 def get_mean_and_ci(series_set):
@@ -84,7 +105,7 @@ def get_mean_and_ci(series_set):
 
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
-                     dist_metric='euclidean', calc_all_repr_dists=True):
+                     dist_metric='euclidean', calc_all_repr_dists=True, include_individual_rdms=False):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -95,23 +116,27 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
         reports = resfile['reports'].item()
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
+        ys = resfile['ys']
         
     # take subset of snaps and reports if necessary
     snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
 
     mean_repr_dists = {
-        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
+        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric,
+                                       calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
         for snap_type, repr_snaps in snaps.items()
     }
     
     # also do full item and context repr dists
     item_full_snaps = np.concatenate([snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps],
                                      axis=3)
-    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
+    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric,
+                                                       calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
     ctx_full_snaps = np.concatenate([snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps],
                                     axis=3)
-    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric, calc_all=calc_all_repr_dists)
+    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
+                                                          calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
 
     report_stats = {
         report_type: get_mean_and_ci(report)
@@ -137,7 +162,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
         'train_params': train_params,
         'snap_epochs': snap_epochs,
         'report_epochs': report_epochs,
-        'etg_epochs': etg_epochs
+        'etg_epochs': etg_epochs,
+        'ys': ys
     }
 
 
@@ -162,6 +188,17 @@ def make_plot_grid(n, n_cols=3, ax_dims=(4, 4), ravel=True, prop_cycle=None):
 
 def outside_legend(ax, **legend_params):
     ax.legend(loc='upper left', bbox_to_anchor=(1, 1), **legend_params)
+    
+    
+def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
+    """Add a vertical color bar to an image plot. (source: https://stackoverflow.com/a/33505522)"""
+    divider = axes_grid1.make_axes_locatable(im.axes)
+    width = axes_grid1.axes_size.AxesY(im.axes, aspect=1./aspect)
+    pad = axes_grid1.axes_size.Fraction(pad_fraction, width)
+    current_ax = plt.gca()
+    cax = divider.append_axes("right", size=width, pad=pad)
+    plt.sca(current_ax)
+    return im.axes.figure.colorbar(im, cax=cax, **kwargs)
 
 
 def plot_report(ax, res, report_type, with_ci=True, label=None, **plot_params):
@@ -204,7 +241,7 @@ def _get_names_for_snapshots(snap_type, **net_params):
     
     
 def plot_matrix_with_labels(ax, mat, labels, colorbar=True, **imshow_params):
-    """Helper to plot a matrix with each row/column labeled with 'labels'"""
+    """Helper to plot a square matrix with each row/column labeled with 'labels'"""
     n = len(labels)
     assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
     assert n == mat.shape[0], 'Wrong number of labels'
@@ -217,8 +254,7 @@ def plot_matrix_with_labels(ax, mat, labels, colorbar=True, **imshow_params):
     ax.set_yticklabels(labels)
     
     if colorbar:
-        # some magic from SO
-        ax.get_figure().colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        add_colorbar(image)
     
     return image
     
@@ -378,7 +414,7 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
     ax.set_xlabel('Hidden layer neurons')
     ax.set_title(f'{title_label} correlation of hidden-to-attribute weights\n' + 
                  f'with input attributes (run {run_num+1}, epoch {epoch})')
-    ax.get_figure().colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    add_colorbar(image)
     
     return image
 
@@ -624,3 +660,75 @@ def fit_linear_model(formula, data_dict):
     y, x = dmatrices(formula, data=data_dict, return_type='dataframe')
     model = OLS(y, x)
     return model.fit()
+
+
+def get_mean_attr_freqs(res, train_items=slice(None)):
+    """
+    Returns a vector of length n_items for each individual run which reports the the mean frequency of
+    all "on" attributes (# of items with that attribute), across all contexts, for each item.
+    """
+    ys = res['ys']
+    ctx_per_domain = res['net_params']['ctx_per_domain']
+    n_domains = res['net_params']['n_domains']
+    inputs_per_domain = dd.ITEMS_PER_DOMAIN * ctx_per_domain
+    n_items = dd.ITEMS_PER_DOMAIN * n_domains
+    mean_attr_freqs = np.empty((len(ys), n_items))
+    mean_attr_freqs = mean_attr_freqs[:, train_items]
+    
+    # iterate over runs
+    for y, mean_attr_freqs_one in zip(ys, mean_attr_freqs):
+        # first collapse attribute matrix over contexts
+        y_collapsed = np.empty((n_items, y.shape[1]))
+        for d in range(res['net_params']['n_domains']):
+            for i in range(dd.ITEMS_PER_DOMAIN):
+                d_offset = d * inputs_per_domain
+                i_abs = i + d * dd.ITEMS_PER_DOMAIN
+                strided_item_inds = np.arange(0, inputs_per_domain, dd.ITEMS_PER_DOMAIN) + d_offset + i
+                y_collapsed[i_abs, :] = np.sum(y[strided_item_inds], axis=0)
+        
+        # exlcude items that weren't used for training
+        y_collapsed = y_collapsed[train_items]
+        
+        # for each item, combine attributes with frequency of each attribute
+        attr_freq = np.sum(y_collapsed, axis=0)
+        mean_attr_freqs_one[:] = (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
+            
+    return mean_attr_freqs
+
+
+def get_attr_freq_dist_mats(res, train_items=slice(None)):
+    """
+    Returns a matrix for each individual run indicating how close the mean # of 
+    attributes shared with other items is for each item
+    """
+    mean_attr_freqs = get_mean_attr_freqs(res, train_items)
+    return np.abs(mean_attr_freqs[:, np.newaxis, :] - mean_attr_freqs[:, :, np.newaxis])
+
+
+def plot_attr_freq_dist_correlation(ax, res, snap_type='item_full', train_items=slice(None),
+                                    label=None, **plot_params):
+    """
+    Plot the correlation between item snapshot distances at each epoch and the absolute
+    differences in mean # of attributes shared with other items. This seems to be an
+    important factor for the item RDMs early in training.
+    """
+    snap_dists = res['repr_dists'][snap_type]['snaps_each']
+    corrs = np.empty(snap_dists.shape[:2])
+        
+    attr_freq_dists = get_attr_freq_dist_mats(res, train_items=train_items)
+    
+    # iterate over runs
+    for run_dists, attr_freq_dist, corr_vec in zip(snap_dists, attr_freq_dists, corrs):        
+        # correlate condensed distances to avoid diagonal (could be varying offset on off-diagonal entries)
+        attr_freq_dist_cd = distance.squareform(attr_freq_dist)        
+        item_repr_dists_cd = [distance.squareform(dist_mat[train_items, train_items]) for dist_mat in run_dists]
+        corr_vec[:] = [np.corrcoef(attr_freq_dist_cd, idist)[0, 1] for idist in item_repr_dists_cd]
+    
+    # now plot, with confidence interval
+    mean, ci = get_mean_and_ci(corrs)
+    ax.plot(res['snap_epochs'], mean, label=label, **plot_params)
+    ax.fill_between(res['snap_epochs'], *ci, alpha=0.3)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Correlation (r)')
+    ax.set_title('Correlation of item representation distance with\ndifference in attribute frequency')
+    

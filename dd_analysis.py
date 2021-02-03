@@ -2,14 +2,12 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D # noqa
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 from scipy.linalg import block_diag
 from scipy import stats
 from sklearn.manifold import MDS
-from itertools import product
 from statsmodels.regression.linear_model import OLS
 from patsy import dmatrices
 
@@ -43,10 +41,11 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True):
     recorded epoch. This is the n_inputs x n_inputs block diagonal of dists_all, stacked.
     """
 
-    if metric == 'spearman':
-        dist_fn = lambda snaps: 1 - stats.spearmanr(snaps, axis=1)[0]
-    else:
-        dist_fn = lambda snaps: distance.squareform(distance.pdist(snaps, metric=metric))
+    def dist_fn(snaps):
+        if metric == 'spearman':
+            return 1 - stats.spearmanr(snaps, axis=1)[0]
+        else:
+            return distance.squareform(distance.pdist(snaps, metric=metric))
     
     if calc_all:
         n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape

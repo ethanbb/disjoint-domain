@@ -125,11 +125,14 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
 
 
 def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
-                            intragroup_dists=[4, 12], intergroup_dist=40):
+                            intragroup_dists=None, intergroup_dist=40):
     """
     Make attribute vectors with 2 clusters in a systematic way. All distances are Hamming and
     should be divisible by 4 (2 in the case of intergroup)
     """
+    if intragroup_dists is None:
+        intragroup_dists = [4, 12]
+
     clust_sizes = get_cluster_sizes(clusters)
     max_disjoint_bits = max(ATTRS_SET_PER_ITEM, attrs_per_context - ATTRS_SET_PER_ITEM)
     
@@ -166,13 +169,17 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
     return attrs
     
 
-def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_dists=[10], **_extra):
+def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_dists=None, **_extra):
     """
     Make attribute vectors that are all equidistant from each other with Hamming distance `dist`. 
     attrs_per_context must be at least ATTRS_SET_PER_ITEM + (dist/2) * (ITEMS_PER_DOMAIN-1)
     (by default, at least 60). Also, dist must be even.
     """
-    dist = intragroup_dists[0]
+    if intragroup_dists is None:
+        dist = 10
+    else:
+        dist = intragroup_dists[0]
+
     if dist % 2 != 0:
         raise ValueError('dist must be even')
     half_dist = dist // 2

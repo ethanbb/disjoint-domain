@@ -33,7 +33,8 @@ class DisjointDomainNet(nn.Module):
                  ctx_repr_units=16, hidden_units=32, rng_seed=None, torchfp=None,
                  device=None, merged_repr=False, use_item_repr=True, use_ctx_repr=True,
                  cluster_info='4-2-2', last_domain_cluster_info=None,
-                 param_init_type='normal', param_init_scale=0.01, fix_biases=False):
+                 param_init_type='normal', param_init_scale=0.01, fix_biases=False,
+                 fixed_bias=-2):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
@@ -79,7 +80,7 @@ class DisjointDomainNet(nn.Module):
         def make_bias(n_units):
             """Make bias for a layer, either a constant or trainable parameter"""
             if fix_biases:
-                return torch.full((n_units,), -2., device=device)
+                return torch.full((n_units,), fixed_bias, device=device)
             else:
                 return nn.Parameter(torch.empty((n_units,), device=device))
         

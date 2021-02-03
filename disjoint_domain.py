@@ -61,19 +61,24 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
     return similar_vecs
 
 
-def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2', **_extra):
+def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
+                            intergroup_dist=40, **_extra):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
     These attributes are simply repeated for each domain.
 
     attrs_per_context must be at least 50 (approximately) in order for the distances to be correct.
-    Each vector has 25 attributes activated within the current context, so that cross-context distances are sqrt(50).
+    intergroup_dist refers to the distance between the circle and "other item" centroids.
     
     clust_sizes: 3-item list of # of circles, squares, and stars. Currently # of stars must be 2.
+
     """
-    if attrs_per_context < 50:
-        raise ValueError('Need >= 50 attrs for standard attribute vecs')
+    # Validate everything first
+    max_disjoint_bits = max(ATTRS_SET_PER_ITEM, attrs_per_context - ATTRS_SET_PER_ITEM)
+    
+    if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
+        raise ValueError(f'Invalid intergroup distance - must be even and <= {max_disjoint_bits * 2}')
     
     clust_sizes = get_cluster_sizes(clusters)
     if len(clust_sizes) != 3 or clust_sizes[2] != 2:
@@ -94,9 +99,10 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
         attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, 4)
 
         # pick centroid for other items, which should be 40 bits away from this centroid.
+        # (or overridden by setting intergroup_dist)
         other_centroid = circ_centroid.copy()
-        other_centroid[choose_k(circ_centroid_unset, 20)] = 1
-        other_centroid[choose_k(circ_centroid_set, 20)] = 0
+        other_centroid[choose_k(circ_centroid_unset, intergroup_dist // 2)] = 1
+        other_centroid[choose_k(circ_centroid_set, intergroup_dist // 2)] = 0
 
         # now square and star centroids, which are centered on other_centroid and differ by 12 bits
         square_centroid, star_centroid = _make_n_dist_d_attr_vecs(other_centroid, 2, 12)
@@ -297,17 +303,19 @@ def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, cluster_info=
     return distance.squareform(mean_dist)
 
     
-def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
+def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2', **_extra):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
     dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context, cluster_info)
     condensed_dist = distance.squareform(dist_mat)
     
+    item_names = get_items(n_domains=1, cluster_info=cluster_info)[1]
+    
     fig, ax = plt.subplots()
     z = hierarchy.linkage(condensed_dist)
     with plt.rc_context({'lines.linewidth': 2.5}):
         hierarchy.dendrogram(z, ax=ax, orientation='right', color_threshold=0.6*max(z[:, 2]),
-                             distance_sort='ascending')
+                             distance_sort='ascending', labels=item_names)
     ax.set_title('Item attribute similarities, collapsed across contexts')
     ax.set_xlabel('Euclidean distance')
     ax.set_ylabel('Input #')
@@ -357,7 +365,10 @@ def item_group_symbol(n, clusters='4-2-2'):
         clusters = clusters['clusters']
     if len(get_cluster_sizes(clusters)) == 1:
         return ''
-    symbol_array = np.array(['*', '@', '$'])
+    
+    symbol_array = np.array(['\u26ab',  # circle
+                             '\u25aa',  # square
+                             '\u2605']) # star 
     return symbol_array[item_group(n, clusters)]
     
 

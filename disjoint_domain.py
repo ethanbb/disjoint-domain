@@ -4,9 +4,9 @@ from scipy.cluster import hierarchy
 from scipy.spatial import distance
 import matplotlib.pyplot as plt
 import torch
+from typing import Dict, Any
 
 ITEMS_PER_DOMAIN = 8
-ATTRS_SET_PER_ITEM = 25
 
 
 def choose_k_inds(n, k=1):
@@ -61,8 +61,8 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
     return similar_vecs
 
 
-def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
-                            intergroup_dist=40, **_extra):
+def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                            clusters='4-2-2', intergroup_dist=40, **_extra):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
@@ -75,7 +75,7 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
 
     """
     # Validate everything first
-    max_disjoint_bits = max(ATTRS_SET_PER_ITEM, attrs_per_context - ATTRS_SET_PER_ITEM)
+    max_disjoint_bits = max(attrs_set_per_item, attrs_per_context - attrs_set_per_item)
     
     if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
         raise ValueError(f'Invalid intergroup distance - must be even and <= {max_disjoint_bits * 2}')
@@ -91,7 +91,7 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
         # first, handle circles, which all pairwise have distance 2, i.e. each pair differs by 4 bits.
         # choose centroid randomly
         circ_centroid = np.zeros(attrs_per_context)
-        circ_centroid_set = choose_k(np.arange(attrs_per_context), ATTRS_SET_PER_ITEM)
+        circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
 
@@ -130,8 +130,8 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-2-2',
     return attrs
 
 
-def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
-                            intragroup_dists=None, intergroup_dist=40):
+def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                            clusters='4-4', intragroup_dists=None, intergroup_dist=40):
     """
     Make attribute vectors with 2 clusters in a systematic way. All distances are Hamming and
     should be divisible by 4 (2 in the case of intergroup)
@@ -140,7 +140,7 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
         intragroup_dists = [4, 12]
 
     clust_sizes = get_cluster_sizes(clusters)
-    max_disjoint_bits = max(ATTRS_SET_PER_ITEM, attrs_per_context - ATTRS_SET_PER_ITEM)
+    max_disjoint_bits = max(attrs_set_per_item, attrs_per_context - attrs_set_per_item)
     
     # Validate everything first
     if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
@@ -155,7 +155,7 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
         
     for attr_mat in attrs:
         circ_centroid = np.zeros(attrs_per_context)
-        circ_centroid_set = choose_k(np.arange(attrs_per_context), ATTRS_SET_PER_ITEM)
+        circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
         
@@ -175,10 +175,11 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, clusters='4-4',
     return attrs
     
 
-def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_dists=None, **_extra):
+def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                                intragroup_dists=None, **_extra):
     """
     Make attribute vectors that are all equidistant from each other with Hamming distance `dist`. 
-    attrs_per_context must be at least ATTRS_SET_PER_ITEM + (dist/2) * (ITEMS_PER_DOMAIN-1)
+    attrs_per_context must be at least attrs_set_per_item + (dist/2) * (ITEMS_PER_DOMAIN-1)
     (by default, at least 60). Also, dist must be even.
     """
     if intragroup_dists is None:
@@ -190,11 +191,11 @@ def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_di
         raise ValueError('dist must be even')
     half_dist = dist // 2
     
-    if attrs_per_context < ATTRS_SET_PER_ITEM + half_dist * (ITEMS_PER_DOMAIN-1):
+    if attrs_per_context < attrs_set_per_item + half_dist * (ITEMS_PER_DOMAIN-1):
         raise ValueError(f'Need more attrs to get equidistant vecs with distance {dist}')
     
     n_rot = half_dist * ITEMS_PER_DOMAIN  # portion of vector that rotates for each item
-    n_fixed_set = ATTRS_SET_PER_ITEM - half_dist
+    n_fixed_set = attrs_set_per_item - half_dist
 
     attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
     
@@ -210,39 +211,117 @@ def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, intragroup_di
             attr_vec[inds] = 1
     
     return attrs
+
+
+def _make_eq_freq_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                            intergroup_dist=19, **_extra):
+    """
+    Make special 4-4-2 cluster attribute vectors such that each item has
+    the same mean attribute frequency. Requires at least 51 attributes per context,
+    and the intergroup distance must be at least 11, at most
+    11 + (attrs_per_context - 51), and odd.
+    """
+    pass
+
+
+def _shuffle_attr_vecs(attr_vecs):
+    """
+    Given a list of attr_vecs for each context, shuffles each one in such a way
+    as to destroy the group hierarchy but preserve the mean frequency per item.
+    The algorithm is as follows:
+        - For each n, 1 <= n <= ITEMS_PER_DOMAIN, we consider the set of
+          attributes that are on for exactly n items. This set is an invariant.
+        - The number of attributes on for each item within each set is also an invariant.
+          Keep track of how many attributes are remaining to be assigned for each item.
+        - Iterate through the attributes in each set and turn on the attribute for a
+          random combination of n of the items that are not yet fully assigned.
+    """
+    if not isinstance(attr_vecs, np.ndarray):
+        return [_shuffle_attr_vecs(arr) for arr in attr_vecs]
+
+    new_attr_vecs = np.zeros(attr_vecs.shape)
+    for num_items in range(1, ITEMS_PER_DOMAIN + 1):
+        set_attrs = np.isclose(np.sum(attr_vecs, axis=0), num_items)
+        attr_vecs_n = attr_vecs[:, set_attrs]
+        num_attrs = attr_vecs_n.shape[1]
+        num_to_assign = np.round(np.sum(attr_vecs_n, axis=1)).astype(int)
+        skips_left = num_attrs - num_to_assign  # any with skips_left == 0 get set from there on
+        attr_vecs_n[...] = 0
+
+        # iterate through and assign attributes to items randomly
+        for vec in attr_vecs_n.T:
+            # include all items that must be included to not run out of attributes
+            items_to_set = np.flatnonzero(skips_left == 0)
+            assert len(items_to_set) <= num_items, "Oops, something's wrong"
+
+            # choose remainder from items that may or may not be included here
+            n_to_choose = num_items - len(items_to_set)
+            items_to_choose_from = np.flatnonzero((num_to_assign > 0) & (skips_left > 0))
+            items_to_set = np.append(items_to_set, choose_k(items_to_choose_from, n_to_choose))
+
+            vec[items_to_set] = 1
+            num_to_assign[items_to_set] -= 1
+            skips_left[np.setdiff1d(range(ITEMS_PER_DOMAIN), items_to_set)] -= 1
+
+        assert np.all(num_to_assign == 0), "Oops, something's wrong"
+        new_attr_vecs[:, set_attrs] = attr_vecs_n
+
+    return new_attr_vecs
     
     
 def normalize_cluster_info(cluster_info):
     """
     Get a dict that specifies information about the attribute clusters.
-    Input is either a string (equivalent to {'clusters': cluster_info}) or
-    a dict with keys 'clusters', 'intragroup_dists', and 'intergroup_dist'.
-    The latter two keys are optional and default to None.
+    Input is either a string or a dict with keys 'clusters',
+    'intragroup_dists', 'intergroup_dist', and 'special'.
+    The latter three keys are optional and default to None.
+    If input is a string, the part before the first underscore is interpreted as 'clusters'
+    and each underscore-separated string after the the first (if any)
+    becomes an element of the list in 'special'.
     """
     if isinstance(cluster_info, str):
-        return {'clusters': cluster_info}
+        clusters, *special = cluster_info.split('_')
+        return {'clusters': clusters, 'special': special}
+    cluster_info: Dict[str, Any] = {'special': [], **cluster_info}
     return cluster_info
     
 
-def make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info):
+def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info):
     """Wrapper to make any set of attr vectors (returns a list of one matrix per context)"""
+    if attrs_set_per_item > attrs_per_context:
+        raise ValueError('Cannot set more attrs per item than # allocated to each context')
+
     cluster_info = normalize_cluster_info(cluster_info)
-    n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
-    
-    try:
-        attr_vec_fn = {
-            1: _make_equidistant_attr_vecs,
-            2: _make_2_group_attr_vecs,
-            3: _make_3_group_attr_vecs
-        }[n_clusts]
-    except KeyError:
-        raise ValueError('Invalid clusters specification')
+
+    # special case for equalized attribute frequency
+    if 'eq_freq' in cluster_info['special']:
+        if cluster_info['clusters'] != '4-2-2':
+            raise ValueError('eq-freq attributes are only defined for 4-2-2 clusters')
+
+        attr_vec_fn = _make_eq_freq_attr_vecs
+    else:
+        n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
+        try:
+            attr_vec_fn = {
+                1: _make_equidistant_attr_vecs,
+                2: _make_2_group_attr_vecs,
+                3: _make_3_group_attr_vecs
+            }[n_clusts]
+        except KeyError:
+            raise ValueError('Invalid clusters specification')
         
-    return attr_vec_fn(ctx_per_domain, attrs_per_context, **cluster_info)
+    attr_vecs = attr_vec_fn(ctx_per_domain, attrs_per_context, attrs_set_per_item, **cluster_info)
+
+    # special case for shuffled attribute-item assignments keeping same mean
+    # attr frequency for each item
+    if 'shuffled' in cluster_info['special']:
+        attr_vecs = _shuffle_attr_vecs(attr_vecs)
+
+    return attr_vecs
 
     
-def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4, 
-                 cluster_info='4-2-2', last_domain_cluster_info=None):
+def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
+                 n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
@@ -264,19 +343,22 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, n_domains=4,
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
         
-    domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info)
+    domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                   attrs_set_per_item, cluster_info)
                     for _ in range(n_domains - 1)]
-    domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context, last_domain_cluster_info))
+    domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                       attrs_set_per_item, last_domain_cluster_info))
     attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
 
     return item_mat, context_mat, attr_mat
 
 
-def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
+def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
+                         attrs_set_per_item=25, cluster_info='4-2-2'):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
-    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, n_domains=1,
-                                                   cluster_info=cluster_info)
+    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                                                   n_domains=1, cluster_info=cluster_info)
 
     fig = plt.figure()
 
@@ -302,18 +384,21 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50, cluster_info='4
     ax.set_xticks(range(0, attr_mat.shape[1], 10))
 
 
-def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2'):
+def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
+                           cluster_info='4-2-2'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
     
-    attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, cluster_info)
+    attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info)
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
     return distance.squareform(mean_dist)
 
     
-def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, cluster_info='4-2-2', **_extra):
+def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
+                                   cluster_info='4-2-2', **_extra):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
-    dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context, cluster_info)
+    dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context,
+                                      attrs_set_per_item, cluster_info)
     condensed_dist = distance.squareform(dist_mat)
     
     item_names = get_items(n_domains=1, cluster_info=cluster_info)[1]
@@ -322,7 +407,7 @@ def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, clust
     z = hierarchy.linkage(condensed_dist)
     with plt.rc_context({'lines.linewidth': 2.5}):
         hierarchy.dendrogram(z, ax=ax, orientation='right', color_threshold=0.6*max(z[:, 2]),
-                             distance_sort='ascending', labels=item_names)
+                             distance_sort='ascending', labels=np.array(item_names))
     ax.set_title('Item attribute similarities, collapsed across contexts')
     ax.set_xlabel('Euclidean distance')
     ax.set_ylabel('Input #')

@@ -662,6 +662,32 @@ def fit_linear_model(formula, data_dict):
     return model.fit()
 
 
+def _mean_attr_freqs_for_attr_vecs(y, ctx_per_domain, train_items=slice(None)):
+    """
+    Given some matrix of attributes (columns) for each item (rows),
+    return a vector of mean attribute frequencies.
+    """
+    inputs_per_domain = dd.ITEMS_PER_DOMAIN * ctx_per_domain
+    n_items = len(y) // ctx_per_domain
+    n_domains = n_items // dd.ITEMS_PER_DOMAIN
+
+    # first collapse attribute matrix over contexts
+    y_collapsed = np.empty((n_items, y.shape[1]))
+    for d in range(n_domains):
+        for i in range(dd.ITEMS_PER_DOMAIN):
+            d_offset = d * inputs_per_domain
+            i_abs = i + d * dd.ITEMS_PER_DOMAIN
+            strided_item_inds = np.arange(0, inputs_per_domain, dd.ITEMS_PER_DOMAIN) + d_offset + i
+            y_collapsed[i_abs, :] = np.sum(y[strided_item_inds], axis=0)
+
+    # exlcude items that weren't used for training
+    y_collapsed = y_collapsed[train_items]
+
+    # for each item, combine attributes with frequency of each attribute
+    attr_freq = np.sum(y_collapsed, axis=0)
+    return (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
+
+
 def get_mean_attr_freqs(res, train_items=slice(None)):
     """
     Returns a vector of length n_items for each individual run which reports the the mean frequency of
@@ -669,31 +695,8 @@ def get_mean_attr_freqs(res, train_items=slice(None)):
     """
     ys = res['ys']
     ctx_per_domain = res['net_params']['ctx_per_domain']
-    n_domains = res['net_params']['n_domains']
-    inputs_per_domain = dd.ITEMS_PER_DOMAIN * ctx_per_domain
-    n_items = dd.ITEMS_PER_DOMAIN * n_domains
-    mean_attr_freqs = np.empty((len(ys), n_items))
-    mean_attr_freqs = mean_attr_freqs[:, train_items]
-    
-    # iterate over runs
-    for y, mean_attr_freqs_one in zip(ys, mean_attr_freqs):
-        # first collapse attribute matrix over contexts
-        y_collapsed = np.empty((n_items, y.shape[1]))
-        for d in range(res['net_params']['n_domains']):
-            for i in range(dd.ITEMS_PER_DOMAIN):
-                d_offset = d * inputs_per_domain
-                i_abs = i + d * dd.ITEMS_PER_DOMAIN
-                strided_item_inds = np.arange(0, inputs_per_domain, dd.ITEMS_PER_DOMAIN) + d_offset + i
-                y_collapsed[i_abs, :] = np.sum(y[strided_item_inds], axis=0)
-        
-        # exlcude items that weren't used for training
-        y_collapsed = y_collapsed[train_items]
-        
-        # for each item, combine attributes with frequency of each attribute
-        attr_freq = np.sum(y_collapsed, axis=0)
-        mean_attr_freqs_one[:] = (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
-            
-    return mean_attr_freqs
+    return np.stack([_mean_attr_freqs_for_attr_vecs(y, ctx_per_domain, train_items)
+                     for y in ys])
 
 
 def get_attr_freq_dist_mats(res, train_items=slice(None)):

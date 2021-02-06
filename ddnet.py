@@ -20,6 +20,7 @@ class DisjointDomainNet(nn.Module):
 
         item_mat, context_mat, attr_mat = dd.make_io_mats(
             ctx_per_domain=self.ctx_per_domain, attrs_per_context=self.attrs_per_context,
+            attrs_set_per_item=self.attrs_set_per_item,
             n_domains=self.n_domains, cluster_info=self.cluster_info, 
             last_domain_cluster_info=self.last_domain_cluster_info)
 
@@ -29,10 +30,10 @@ class DisjointDomainNet(nn.Module):
 
         return x_item, x_context, y
 
-    def __init__(self, ctx_per_domain, attrs_per_context, n_domains, item_repr_units=16,
-                 ctx_repr_units=16, hidden_units=32, rng_seed=None, torchfp=None,
-                 device=None, merged_repr=False, use_item_repr=True, use_ctx_repr=True,
-                 cluster_info='4-2-2', last_domain_cluster_info=None,
+    def __init__(self, ctx_per_domain, attrs_per_context, n_domains, attrs_set_per_item=25,
+                 item_repr_units=16, ctx_repr_units=16, hidden_units=32, rng_seed=None,
+                 torchfp=None, device=None, merged_repr=False, use_item_repr=True,
+                 use_ctx_repr=True, cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01, fix_biases=False,
                  fixed_bias=-2):
         super(DisjointDomainNet, self).__init__()
@@ -42,6 +43,7 @@ class DisjointDomainNet(nn.Module):
         self.ctx_per_domain = ctx_per_domain
         self.attrs_per_context = attrs_per_context
         self.n_domains = n_domains
+        self.attrs_set_per_item = attrs_set_per_item
         self.n_items = dd.ITEMS_PER_DOMAIN * n_domains
         self.n_contexts = ctx_per_domain * n_domains
         self.n_attributes = attrs_per_context * self.n_contexts

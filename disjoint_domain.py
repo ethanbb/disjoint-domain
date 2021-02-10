@@ -35,7 +35,7 @@ def get_cluster_sizes(clusters):
     sizes = [int(sz) for sz in clusters.partition('_')[0].split('-')]
     if sum(sizes) != ITEMS_PER_DOMAIN:
         raise ValueError('Invalid clusters specification')
-    
+
     return sizes
 
 
@@ -45,16 +45,22 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
     Here d is the *Hamming* distance between vectors, which is the square of Euclidean distance
     (and each vector is half the Hamming distance from the centroid as to each other vector)
     """
+    if n == 1:  # don't overcomplicate things, just use the centroid itself
+        return centroid.copy()
+
+    if (n * d) % 4 != 0:
+        raise ValueError('Distance times n must be a multiple of 4')
+
     try:
-        all_set_bits = choose_k_set_bits(1 - centroid, n * d // 4)
-        all_unset_bits = choose_k_set_bits(centroid, n * d // 4)
+        all_set_bits = choose_k_set_bits(1 - centroid, round(n * d // 4))
+        all_unset_bits = choose_k_set_bits(centroid, round(n * d // 4))
     except ValueError:
         raise ValueError(f'Not enough attributes to make {n} vectors of dist {d} from each other')
-        
+
     similar_vecs = np.tile(centroid.copy(), (n, 1))
-    
-    for similar_vec, set_bits, unset_bits in zip(similar_vecs, np.split(all_set_bits, n),
-                                                 np.split(all_unset_bits, n)):
+
+    for similar_vec, set_bits, unset_bits in zip(similar_vecs, np.array_split(all_set_bits, n),
+                                                 np.array_split(all_unset_bits, n)):
         similar_vec[set_bits] = 1
         similar_vec[unset_bits] = 0
 
@@ -62,13 +68,19 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
 
 
 def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                            clusters='4-2-2', intergroup_dist=40, **_extra):
+                            clusters='4-2-2', intragroup_dists=None, intergroup_dist=40, **_extra):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
     These attributes are simply repeated for each domain.
 
     attrs_per_context must be at least 50 (approximately) in order for the distances to be correct.
+    If not None (for default), intragroup_dists should be a list of length 4, specifying Hamming distances:
+        - between each pair of circles (default=4)
+        - between square and star centroids (default=12)
+        - between squares (default=2)
+        - between stars (default=10)
+    Each must be even and must be a multiple of 4 if the corresponding group has an odd number of items.
     intergroup_dist refers to the distance between the circle and "other item" centroids.
     
     clust_sizes: 3-item list of # of circles, squares, and stars. Currently # of stars must be 2.
@@ -76,27 +88,33 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
     """
     # Validate everything first
     max_disjoint_bits = max(attrs_set_per_item, attrs_per_context - attrs_set_per_item)
-    
+
     if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
         raise ValueError(f'Invalid intergroup distance - must be even and <= {max_disjoint_bits * 2}')
-    
+
     clust_sizes = get_cluster_sizes(clusters)
-    if len(clust_sizes) != 3 or clust_sizes[2] != 2:
+    if len(clust_sizes) != 3 or sum(clust_sizes) != 8:
         raise ValueError('Invalid clust_sizes')
-    n_circles, n_squares, _ = clust_sizes
+    n_circles, n_squares, n_stars = clust_sizes
+
+    if intragroup_dists is None:
+        default_sq_dist = 4 * (n_squares-1)/n_squares  # hack to allow all but 1 to be 2 away from the centroid
+        intragroup_dists = [4, 12, default_sq_dist, 10]
+
+    circ_dist, sqst_dist, square_dist, star_dist = intragroup_dists
 
     attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
 
     for attr_mat in attrs:
-        # first, handle circles, which all pairwise have distance 2, i.e. each pair differs by 4 bits.
+        # first, handle circles
         # choose centroid randomly
         circ_centroid = np.zeros(attrs_per_context)
         circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
 
-        # now choose 2 distinct bits to flip for each of the 'circle' vectors, keeping total # set = 25
-        attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, 4)
+        # now choose bits to flip for each of the 'circle' vectors, keeping total # set the same
+        attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, circ_dist)
 
         # pick centroid for other items, which should be 40 bits away from this centroid.
         # (or overridden by setting intergroup_dist)
@@ -104,28 +122,15 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
         other_centroid[choose_k(circ_centroid_unset, intergroup_dist // 2)] = 1
         other_centroid[choose_k(circ_centroid_set, intergroup_dist // 2)] = 0
 
-        # now square and star centroids, which are centered on other_centroid and differ by 12 bits
-        square_centroid, star_centroid = _make_n_dist_d_attr_vecs(other_centroid, 2, 12)
+        # now square and star centroids, which are centered on other_centroid and differ by 12 bits (by default)
+        square_centroid, star_centroid = _make_n_dist_d_attr_vecs(other_centroid, 2, sqst_dist)
 
-        # squares differ by just 2 bits. be a little imprecise and let one of them be the centroid.
-        attr_mat[n_circles:6, :] = square_centroid
-        sq_set_bits = choose_k_set_bits(1-square_centroid, n_squares-1)
-        sq_unset_bits = choose_k_set_bits(square_centroid, n_squares-1)
-        for attr_vec, set_bit, unset_bit in zip(attr_mat[n_circles+1:6], sq_set_bits, sq_unset_bits):
-            attr_vec[set_bit] = 1
-            attr_vec[unset_bit] = 0
+        # squares differ by just 2 bits (by default). be a little imprecise and let one of them be the centroid.
+        attr_mat[n_circles + np.arange(n_squares)] = _make_n_dist_d_attr_vecs(square_centroid, n_squares, square_dist)
 
-        # stars differ by 10 bits. again be a little imprecise, let one differ from centroid by 4 and the other by 6 (all unique)
-        set_bits = choose_k_set_bits(1-star_centroid, 5)
-        unset_bits = choose_k_set_bits(star_centroid, 5)
-
-        attr_mat[6, :] = star_centroid
-        attr_mat[6, set_bits[:2]] = 1
-        attr_mat[6, unset_bits[:2]] = 0
-
-        attr_mat[7, :] = star_centroid
-        attr_mat[7, set_bits[2:]] = 1
-        attr_mat[7, unset_bits[2:]] = 0
+        # stars differ by 10 bits (by default).
+        # again be a little imprecise, let one differ from centroid by 4 and the other by 6 (all unique)
+        attr_mat[-n_stars:] = _make_n_dist_d_attr_vecs(star_centroid, n_stars, star_dist)
 
     return attrs
 
@@ -141,39 +146,39 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
 
     clust_sizes = get_cluster_sizes(clusters)
     max_disjoint_bits = max(attrs_set_per_item, attrs_per_context - attrs_set_per_item)
-    
+
     # Validate everything first
     if intergroup_dist % 2 != 0 or intergroup_dist // 2 > max_disjoint_bits:
         raise ValueError(f'Invalid intergroup distance - must be even and <= {max_disjoint_bits * 2}')
-    
+
     if any([dist % 4 != 0 for dist in intragroup_dists]):
         raise ValueError('Invalid intragroup distances - must all be multiples of 4')
     if any([dist // 4 * n > max_disjoint_bits for dist, n in zip(intragroup_dists, clust_sizes)]):
         raise ValueError('Not enough attributes per cluster for these sizes and intragroup distances')
-    
+
     attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-        
+
     for attr_mat in attrs:
         circ_centroid = np.zeros(attrs_per_context)
         circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
-        
+
         # make cirlces
         n_circles, n_squares = clust_sizes
         circ_dists, square_dists = intragroup_dists
         attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, circ_dists)
-        
+
         # make square centroid
         square_centroid = circ_centroid.copy()
         square_centroid[choose_k(circ_centroid_unset, intergroup_dist // 2)] = 1
         square_centroid[choose_k(circ_centroid_set, intergroup_dist // 2)] = 0
-        
+
         # make squares
         attr_mat[n_circles:] = _make_n_dist_d_attr_vecs(square_centroid, n_squares, square_dists)
-        
+
     return attrs
-    
+
 
 def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
                                 intragroup_dists=None, **_extra):
@@ -190,43 +195,108 @@ def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per
     if dist % 2 != 0:
         raise ValueError('dist must be even')
     half_dist = dist // 2
-    
+
     if attrs_per_context < attrs_set_per_item + half_dist * (ITEMS_PER_DOMAIN-1):
         raise ValueError(f'Need more attrs to get equidistant vecs with distance {dist}')
-    
+
     n_rot = half_dist * ITEMS_PER_DOMAIN  # portion of vector that rotates for each item
     n_fixed_set = attrs_set_per_item - half_dist
 
     attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-    
+
     for attr_mat in attrs:
         # pick fixed set and rotating indices
         fixed_set_and_rot_inds = choose_k_inds(attrs_per_context, n_fixed_set + n_rot)
         fixed_set_inds, rot_inds = fixed_set_and_rot_inds.split([n_fixed_set, n_rot])
         rot_inds_each = rot_inds.split(half_dist)
-        
+
         # set fixed indices for all items and rotating indices for each individually
         attr_mat[:, fixed_set_inds] = 1
         for attr_vec, inds in zip(attr_mat, rot_inds_each):
             attr_vec[inds] = 1
-    
+
     return attrs
 
 
 def _make_eq_freq_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                            intergroup_dist=19, **_extra):
+                            intergroup_dist=22, **_extra):
     """
     Make special 4-4-2 cluster attribute vectors such that each item has
-    the same mean attribute frequency. Requires at least 51 attributes per context,
-    and the intergroup distance must be at least 11, at most
-    11 + (attrs_per_context - 51), and odd.
+    the same mean attribute frequency. Requires at least 53 attributes per context.
+    Here, 'intergroup_dist' is interpreted as "excess" distance above the baseline of
+    20.5 (between circles and squares/stars) and must be even.
+    attrs_set_per_item should be between 12 + intergroup_dist/2 and
+    (attrs_per_context - 53) + 12 - intergroup_dist/2.
     """
-    pass
+    base_attrs_needed = 53
+    excess_attrs = attrs_per_context - base_attrs_needed
+    ig_dist_attrs_per_item = intergroup_dist // 2
+    uniform_attrs = excess_attrs - intergroup_dist # all on or off
+    nonuniform_attrs_per_item = 12 + ig_dist_attrs_per_item
+    all_on_attrs = attrs_set_per_item - nonuniform_attrs_per_item
+    all_off_attrs = uniform_attrs - all_on_attrs
+
+    if excess_attrs < 0:
+        raise ValueError(f'Eq freq requires >= {base_attrs_needed} attributes')
+
+    if (intergroup_dist < 0 or intergroup_dist > excess_attrs or
+            intergroup_dist % 2 != 0):
+        raise ValueError('Intergroup dist not compatible with # of attrs for eq freq')
+
+    if all_on_attrs < 0 or all_on_attrs > uniform_attrs:
+        raise ValueError('Too many or few attrs per item for eq freq')
+
+    # each matrix will be a copy of the template
+    attr_template = np.zeros((ITEMS_PER_DOMAIN, attrs_per_context))
+    curr_ind = 0
+
+    # common for "circles", plus extras for other items to make it work
+    attr_template[:4, curr_ind + np.arange(2 + ig_dist_attrs_per_item)] = 1
+    attr_template[[6, 7], curr_ind + np.arange(2)] = 1
+    curr_ind += 2 + ig_dist_attrs_per_item
+
+    # common for "squares" and "stars"
+    attr_template[4:, curr_ind + np.arange(3 + ig_dist_attrs_per_item)] = 1
+    attr_template[[6, 7], curr_ind + np.arange(2)] = 0
+    curr_ind += 3 + ig_dist_attrs_per_item
+
+    # circle individual attributes, with some extra things for squares and stars
+    for i in range(4):
+        attr_template[i, curr_ind + np.arange(7)] = 1
+        attr_template[4:6, curr_ind] = 1
+        attr_template[[6, 6 + (i % 2), 7], curr_ind + 1 + np.arange(3)] = 1
+        curr_ind += 7
+
+    # square common and individual attributes
+    attr_template[4:6, curr_ind] = 1
+    attr_template[4, curr_ind + 1 + np.arange(4)] = 1
+    attr_template[5, curr_ind + 5 + np.arange(4)] = 1
+    curr_ind += 9
+
+    # star common and individual attributes
+    attr_template[6:8, curr_ind] = 1
+    attr_template[6, curr_ind + 1 + np.arange(2)] = 1
+    attr_template[7, curr_ind + 3 + np.arange(2)] = 1
+    curr_ind += 5
+
+    # circle round robin
+    for i in range(3):
+        for j in range(i+1, 4):
+            attr_template[[i, j], curr_ind] = 1
+            curr_ind += 1
+
+    # attributes common to all
+    attr_template[:, curr_ind + np.arange(all_on_attrs)] = 1
+    curr_ind += all_on_attrs
+
+    assert attrs_per_context - curr_ind == all_off_attrs, "Something's wrong - attributes don't add up!"
+
+    return [attr_template.copy() for _ in range(ctx_per_domain)]
 
 
-def _shuffle_attr_vecs(attr_vecs):
+def _shuffle_attr_vec_mat(attr_vecs):
     """
-    Given a list of attr_vecs for each context, shuffles each one in such a way
+    Given a matrix of attr_vecs (y), shuffles them in such a way
     as to destroy the group hierarchy but preserve the mean frequency per item.
     The algorithm is as follows:
         - For each n, 1 <= n <= ITEMS_PER_DOMAIN, we consider the set of
@@ -236,9 +306,6 @@ def _shuffle_attr_vecs(attr_vecs):
         - Iterate through the attributes in each set and turn on the attribute for a
           random combination of n of the items that are not yet fully assigned.
     """
-    if not isinstance(attr_vecs, np.ndarray):
-        return [_shuffle_attr_vecs(arr) for arr in attr_vecs]
-
     new_attr_vecs = np.zeros(attr_vecs.shape)
     for num_items in range(1, ITEMS_PER_DOMAIN + 1):
         set_attrs = np.isclose(np.sum(attr_vecs, axis=0), num_items)
@@ -267,8 +334,8 @@ def _shuffle_attr_vecs(attr_vecs):
         new_attr_vecs[:, set_attrs] = attr_vecs_n
 
     return new_attr_vecs
-    
-    
+
+
 def normalize_cluster_info(cluster_info):
     """
     Get a dict that specifies information about the attribute clusters.
@@ -284,7 +351,7 @@ def normalize_cluster_info(cluster_info):
         return {'clusters': clusters, 'special': special}
     cluster_info: Dict[str, Any] = {'special': [], **cluster_info}
     return cluster_info
-    
+
 
 def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info):
     """Wrapper to make any set of attr vectors (returns a list of one matrix per context)"""
@@ -294,7 +361,7 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
     cluster_info = normalize_cluster_info(cluster_info)
 
     # special case for equalized attribute frequency
-    if 'eq_freq' in cluster_info['special']:
+    if 'eq-freq' in cluster_info['special']:
         if cluster_info['clusters'] != '4-2-2':
             raise ValueError('eq-freq attributes are only defined for 4-2-2 clusters')
 
@@ -309,17 +376,17 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
             }[n_clusts]
         except KeyError:
             raise ValueError('Invalid clusters specification')
-        
+
     attr_vecs = attr_vec_fn(ctx_per_domain, attrs_per_context, attrs_set_per_item, **cluster_info)
 
     # special case for shuffled attribute-item assignments keeping same mean
     # attr frequency for each item
     if 'shuffled' in cluster_info['special']:
-        attr_vecs = _shuffle_attr_vecs(attr_vecs)
+        attr_vecs = [_shuffle_attr_vec_mat(mat) for mat in attr_vecs]
 
     return attr_vecs
 
-    
+
 def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
                  n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None):
     """
@@ -332,17 +399,17 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     # First make it for a single domain, then use block_diag to replicate.
     item_mat_1 = np.tile(np.eye(ITEMS_PER_DOMAIN), (ctx_per_domain, 1))
     item_mat = block_diag(*[item_mat_1 for _ in range(n_domains)])
-    
+
     context_mat_1 = np.repeat(np.eye(ctx_per_domain), ITEMS_PER_DOMAIN, axis=0)
     context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
-    
+
     # New behavior: generate a new set of attr vecs for each domain.
     if last_domain_cluster_info is None:
         last_domain_cluster_info = cluster_info
-    
+
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
-        
+
     domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context,
                                    attrs_set_per_item, cluster_info)
                     for _ in range(n_domains - 1)]
@@ -387,24 +454,24 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
 def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
                            cluster_info='4-2-2'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
-    
+
     attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info)
     mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
     return distance.squareform(mean_dist)
 
-    
+
 def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                                   cluster_info='4-2-2', **_extra):
+                                   cluster_info='4-2-2', method='single', **_extra):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
     dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context,
                                       attrs_set_per_item, cluster_info)
     condensed_dist = distance.squareform(dist_mat)
-    
+
     item_names = get_items(n_domains=1, cluster_info=cluster_info)[1]
-    
+
     fig, ax = plt.subplots()
-    z = hierarchy.linkage(condensed_dist)
+    z = hierarchy.linkage(condensed_dist, method=method)
     with plt.rc_context({'lines.linewidth': 2.5}):
         hierarchy.dendrogram(z, ax=ax, orientation='right', color_threshold=0.6*max(z[:, 2]),
                              distance_sort='ascending', labels=np.array(item_names))
@@ -416,7 +483,7 @@ def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, attrs
 
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
     """Establish floating-point type and device to use with PyTorch"""
-    
+
     if device is None:
         if use_cuda_if_possible and torch.cuda.is_available():
             device = torch.device('cuda')
@@ -424,7 +491,7 @@ def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
             device = torch.device('cpu')
     else:
         device = torch.device(device)
-            
+
     if device.type == 'cuda':
         ttype_ns = torch.cuda
     else:
@@ -457,12 +524,12 @@ def item_group_symbol(n, clusters='4-2-2'):
         clusters = clusters['clusters']
     if len(get_cluster_sizes(clusters)) == 1:
         return ''
-    
+
     symbol_array = np.array(['\u26ab',  # circle
                              '\u25aa',  # square
-                             '\u2605']) # star 
+                             '\u2605']) # star
     return symbol_array[item_group(n, clusters)]
-    
+
 
 def domain_name(n):
     return chr(ord('A') + n)
@@ -484,13 +551,13 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
                                 else normalize_cluster_info(last_domain_cluster_info))
-    
+
     items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
     all_clusters = [cluster_info['clusters']] * n_domains
     if last_domain_cluster_info is not None:
         last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
         all_clusters[-1] = last_domain_cluster_info['clusters']
-        
+
     item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, clst)
                   for d, clst in enumerate(all_clusters)
                   for n in range(ITEMS_PER_DOMAIN)]

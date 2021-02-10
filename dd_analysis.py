@@ -734,4 +734,3 @@ def plot_attr_freq_dist_correlation(ax, res, snap_type='item_full', train_items=
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Correlation (r)')
     ax.set_title('Correlation of item representation distance with\ndifference in attribute frequency')
-    

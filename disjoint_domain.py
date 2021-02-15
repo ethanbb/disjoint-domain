@@ -571,12 +571,12 @@ def get_contexts(n_domains=4, ctx_per_domain=4, **_extra):
     return contexts, context_names
 
 
-def get_net_dims(n_domains=4, ctx_per_domain=4, attrs_per_context=50, **_extra):
+def get_net_dims(n_domains=4, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, **_extra):
     """Get some basic facts about the default architecture, possibly with overrides"""
     n_items = ITEMS_PER_DOMAIN * n_domains
     n_ctx = ctx_per_domain * n_domains
 
-    return ctx_per_domain, n_domains, n_items, n_ctx, attrs_per_context
+    return ctx_per_domain, n_domains, n_items, n_ctx, attrs_per_context, attrs_set_per_item
 
 
 def calc_snap_epochs(snap_freq, snap_freq_scale, num_epochs):

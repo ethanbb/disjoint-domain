@@ -336,6 +336,44 @@ def _shuffle_attr_vec_mat(attr_vecs):
     return new_attr_vecs
 
 
+def _resample_attr_vec_mat(attr_vecs, item_weights=None):
+    """
+    Given a matrix of attr vecs (y), make a new one that preserves the same distribution of
+    attribute frequencies. Proceeding from most to least frequent attribute in the original matrix,
+    randomly chooses items to assign to the corresponding attribute in the new matrix. The probability of
+    choosing an item can be controlled through item_weights (a list of length ITEMS_PER_DOMAIN; defaults to all equal),
+    and goes to zero once the item has been assigned the number of attributes it had in the original matrix.
+    """
+    if item_weights is None:
+        item_weights = np.repeat(1 / ITEMS_PER_DOMAIN, ITEMS_PER_DOMAIN)
+
+    if len(item_weights) != ITEMS_PER_DOMAIN:
+        raise ValueError(f'item_p must be a list/tuple of length {ITEMS_PER_DOMAIN}')
+
+    if sum(item_weights) <= 0 or any([wt < 0 for wt in item_weights]):
+        raise ValueError('Invalid item weights - must be nonnegative and have positive sum')
+
+    item_weights = torch.tensor(item_weights, dtype=torch.float, device='cpu')
+
+    # info about the y matrix we're basing this on
+    item_remaining_attrs = torch.tensor(np.sum(attr_vecs, axis=1), device='cpu')
+    attr_freqs = np.sum(attr_vecs, axis=0)
+    n_item_seq = np.arange(ITEMS_PER_DOMAIN, 0, -1)  # 8 down to 1
+    freq_freqs = [np.sum(attr_freqs == n) for n in n_item_seq]
+    attr_starts = np.cumsum(np.concatenate([[0], freq_freqs[:-1]]))
+
+    new_attr_vecs = torch.zeros(attr_vecs.shape, device='cpu')
+
+    for n_items, n_attrs, start_i in zip(n_item_seq, freq_freqs, attr_starts):
+        for i_attr in range(start_i, start_i + n_attrs):
+            item_weights[item_remaining_attrs == 0] = 0
+            these_items = torch.multinomial(item_weights, n_items)
+            new_attr_vecs[these_items, i_attr] = 1.
+            item_remaining_attrs[these_items] -= 1
+
+    return new_attr_vecs.numpy()
+
+
 def normalize_cluster_info(cluster_info):
     """
     Get a dict that specifies information about the attribute clusters.
@@ -383,6 +421,14 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
     # attr frequency for each item
     if 'shuffled' in cluster_info['special']:
         attr_vecs = [_shuffle_attr_vec_mat(mat) for mat in attr_vecs]
+
+    # "resample" special case, to disrupt hierarchical structure
+    if 'resample' in cluster_info['special']:
+        try:
+            item_weights = cluster_info['resample_weights']
+        except KeyError:
+            item_weights = None
+        attr_vecs = [_resample_attr_vec_mat(mat, item_weights) for mat in attr_vecs]
 
     return attr_vecs
 

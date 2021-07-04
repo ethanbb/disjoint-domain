@@ -434,12 +434,14 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
 
 
 def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                 n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None):
+                 n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None,
+                 repeat_attrs_over_domains=False):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
     Cluster_info and last_domain_cluster_info should be valid inputs to normalize_cluster_info.
     By default (when None), last_domain_clusters is the same as clusters.
+    repeat_attrs_over_domains - if True, don't regenerate attrs for each domain, just repeat them.
     """
 
     # First make it for a single domain, then use block_diag to replicate.
@@ -449,19 +451,32 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     context_mat_1 = np.repeat(np.eye(ctx_per_domain), ITEMS_PER_DOMAIN, axis=0)
     context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
 
-    # New behavior: generate a new set of attr vecs for each domain.
     if last_domain_cluster_info is None:
         last_domain_cluster_info = cluster_info
+        last_is_same = True
+    else:
+        last_is_same = False
 
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
 
-    domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                   attrs_set_per_item, cluster_info)
-                    for _ in range(n_domains - 1)]
-    domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                       attrs_set_per_item, last_domain_cluster_info))
-    attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
+    if repeat_attrs_over_domains:
+        domain_attrs = make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                      attrs_set_per_item, cluster_info)
+        if last_is_same:
+            attr_mat = block_diag(*([block_diag(*domain_attrs)] * n_domains))
+        else:
+            domain_attrs_last = make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                               attrs_set_per_item, last_domain_cluster_info)
+            attr_mat = block_diag(*([block_diag(*domain_attrs)] * (n_domains - 1) + [block_diag(*domain_attrs_last)]))
+    else:
+        # New behavior: generate a new set of attr vecs for each domain.
+        domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                       attrs_set_per_item, cluster_info)
+                        for _ in range(n_domains - 1)]
+        domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                           attrs_set_per_item, last_domain_cluster_info))
+        attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
 
     return item_mat, context_mat, attr_mat
 

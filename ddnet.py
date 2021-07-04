@@ -22,7 +22,8 @@ class DisjointDomainNet(nn.Module):
             ctx_per_domain=self.ctx_per_domain, attrs_per_context=self.attrs_per_context,
             attrs_set_per_item=self.attrs_set_per_item,
             n_domains=self.n_domains, cluster_info=self.cluster_info, 
-            last_domain_cluster_info=self.last_domain_cluster_info)
+            last_domain_cluster_info=self.last_domain_cluster_info,
+            repeat_attrs_over_domains=self.repeat_attrs_over_domains)
 
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
@@ -35,7 +36,7 @@ class DisjointDomainNet(nn.Module):
                  torchfp=None, device=None, merged_repr=False, use_item_repr=True,
                  use_ctx_repr=True, cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01, fix_biases=False,
-                 fixed_bias=-2):
+                 fixed_bias=-2, repeat_attrs_over_domains=False):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
@@ -52,6 +53,7 @@ class DisjointDomainNet(nn.Module):
         self.use_ctx_repr = use_ctx_repr
         self.cluster_info = cluster_info
         self.last_domain_cluster_info = last_domain_cluster_info
+        self.repeat_attrs_over_domains = repeat_attrs_over_domains
         
         self.dummy_item = torch.zeros((1, self.n_items))
         self.dummy_ctx = torch.zeros((1, self.n_contexts))

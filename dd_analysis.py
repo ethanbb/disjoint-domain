@@ -311,6 +311,17 @@ def plot_repr_dendrogram(ax, res, snap_type, snap_ind, title_addon=None):
     ax.set_title(title)
 
 
+def plot_repr_embedding(ax, res, snap_type, snap_ind, colors=None):
+    """Similar to plot_rsa, but plot 2D embeddings of items or contexts using MDS"""
+    input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
+    embedding = MDS(n_components=2, dissimilarity='precomputed')
+    reprs_embedded = embedding.fit_transform(res['repr_dists'][snap_type]['snaps'][snap_ind])
+    
+    ax.scatter(*reprs_embedded.T, c=colors)
+    for pos, name in zip(reprs_embedded, input_names):
+        ax.annotate(name, pos)
+        
+    
 def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
     """
     Plot trajectories of each item or context representation over training

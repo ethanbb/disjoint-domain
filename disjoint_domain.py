@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.linalg import block_diag
+from scipy.linalg import block_diag, svd
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 import matplotlib.pyplot as plt
@@ -136,7 +136,7 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
 
 
 def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                            clusters='4-4', intragroup_dists=None, intergroup_dist=40):
+                            clusters='4-4', intragroup_dists=None, intergroup_dist=40, **_extra):
     """
     Make attribute vectors with 2 clusters in a systematic way. All distances are Hamming and
     should be divisible by 4 (2 in the case of intergroup)
@@ -435,7 +435,7 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
 
 def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
                  n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None,
-                 repeat_attrs_over_domains=False):
+                 repeat_attrs_over_domains=False, **_extra):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
@@ -479,6 +479,41 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
         attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
 
     return item_mat, context_mat, attr_mat
+
+
+def get_io_corr_matrix(item_mat, attr_mat, n_domains):
+    """
+    Computes the input-output correlation matrix for each domain (defined in Saxe paper)
+    The result is a list of attrs_per_context x ITEMS_PER_DOMAIN matrices.
+    """
+    corr_mats = []
+    
+    for i, (item_slab, attr_slab) in enumerate(zip(np.split(item_mat, n_domains), np.split(attr_mat, n_domains))):
+        item_submat = np.split(item_slab, n_domains, axis=1)[i]
+        attr_submat = np.split(attr_slab, n_domains, axis=1)[i]
+        corr_mats.append(attr_submat.T @ (item_submat / item_submat.shape[0]))
+    
+    return corr_mats
+
+
+def get_item_svd_loadings(item_mat, attr_mat, n_domains):
+    """
+    Computes SVD V-matrices for each item in each domain and concatenates them along the item dimension (each row is an item).
+    The rows of the resulting matrix can be compared, e.g. with cityblock distance, to quantify differences in 'hierarchical role'.
+    """
+    corr_mats = get_io_corr_matrix(item_mat, attr_mat, n_domains)
+    svd_loading_list = []
+    for i, corr_mat in enumerate(corr_mats):
+        _, s, Vh = svd(corr_mat, full_matrices=False)
+        # resolve sign ambiguity by flipping modes that are "opposite" the first domain's
+        signflip_mat = np.eye(ITEMS_PER_DOMAIN)
+        if i != 0:
+            mode_corr = np.diag(np.diag(s) @ Vh @ svd_loading_list[0])
+            signflip_mat -= 2 * np.diag(mode_corr < 0)
+                    
+        svd_loading_list.append(Vh.T @ signflip_mat @ np.diag(s))
+
+    return np.concatenate(svd_loading_list, axis=0)
 
 
 def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,

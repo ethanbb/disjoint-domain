@@ -712,11 +712,25 @@ def get_mean_attr_freqs(res, train_items=slice(None)):
 
 def get_attr_freq_dist_mats(res, train_items=slice(None)):
     """
-    Returns a matrix for each individual run indicating how close the mean # of 
-    attributes shared with other items is for each item
+    Returns a matrix for each individual run indicating how much the mean # of 
+    attributes shared with other items differs for each item pair
     """
     mean_attr_freqs = get_mean_attr_freqs(res, train_items)
     return np.abs(mean_attr_freqs[:, np.newaxis, :] - mean_attr_freqs[:, :, np.newaxis])
+
+
+def get_svd_dist_mats(res):
+    """
+    Returns a matrix for each individual run indicating the difference between each pair of items
+    as a cityblock distance of their SVD loadings. This is supposed to capture info abount hierarchical position.
+    """
+    ys = res['ys']
+    item_mat = dd.make_io_mats(**res['net_params'])[0]
+    n_domains = res['net_params']['n_domains']
+    return np.stack([
+        distance.squareform(distance.pdist(dd.get_item_svd_loadings(item_mat, y, n_domains), metric='cityblock'))
+        for y in ys
+    ])
 
 
 def plot_attr_freq_dist_correlation(ax, res, snap_type='item_full', train_items=slice(None),

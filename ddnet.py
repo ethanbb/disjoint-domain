@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torchnlp.nn.weight_drop import WeightDropLinear
 import numpy as np
 from copy import deepcopy
 
@@ -10,9 +11,28 @@ class DisjointDomainNet(nn.Module):
     """
     Network for disjoint domain learning as depicted in Figure R4.
     
-    item_repr_compression: 
-    Contains separate item representation and context representation layers,
-    unless "merged" is True, in which case there is a common representation layer.
+    Constructor keyword arguments:
+    - attrs_set_per_item: How many of the ground-truth output attributes are set for each item/context pair
+    - use_item_repr: False to skip item representation layer, pass items directly to hidden layer
+    - item_repr_units: Size of item representation layer (unless merged_repr is True or use_item_repr is False)
+    - use_ctx_repr: False to skip context representation layer, pass contexts directly to hidden layer
+    - ctx_repr_units: Size of context representation layer (unless merged_repr is True or use_ctx_repr is False)
+    - merged_repr: Use a single representation layer for items and contexts, of size item_repr_units + ctx_repr_units
+    - hidden_units: Size of (final) hidden layer
+    - use_ctx: False to not have any context inputs at all (probably best with ctx_per_domain=1)
+    - share_contexts: True to use one set of context inputs for all domains instead of separate ones (WIP)
+    - cluster_info: String or dict specifying item similarity structure, etc. - see dd.make_attr_vecs()
+    - last_domain_cluster_info: If not None, possibly different cluster_info for the last domain
+    - param_init_type: How to initialize weights and biases - 'default' (PyTorch default), 'normal' or 'uniform'
+    - param_init_scale: If param_init_type != 'default', std of normal distribution or 1/2 width of uniform distribution
+    - fix_biases: If True, don't use trainable biases
+    - fixed_bias: Only if fix_biases is True, use this value as the fixed bias (set to 0 for no biases)
+    - repeat_attrs_over_domains: Whether to reuse the exact same ground truth attributes, shifted, for each domain
+    - activation_fn: Function to use as nonlinearity for all layers except hidden-to-attr, which is always sigmoid
+    - attr_weightdrop: If nonzero (but <= 1), drop hidden-to-attr weights with this probability
+    - rng_seed: Seed for the PyTorch RNG
+    - torchfp: Override floating-point class to use for weights & activations
+    - device: Override device (torch.device('cuda') or torch.device('cpu'))
     """
 
     def gen_training_tensors(self):
@@ -32,11 +52,12 @@ class DisjointDomainNet(nn.Module):
         return x_item, x_context, y
 
     def __init__(self, ctx_per_domain, attrs_per_context, n_domains, attrs_set_per_item=25,
-                 item_repr_units=16, ctx_repr_units=16, hidden_units=32, rng_seed=None,
-                 torchfp=None, device=None, merged_repr=False, use_item_repr=True,
-                 use_ctx_repr=True, cluster_info='4-2-2', last_domain_cluster_info=None,
+                 use_item_repr=True, item_repr_units=16, use_ctx_repr=True, ctx_repr_units=16,
+                 merged_repr=False, hidden_units=32, use_ctx=True, share_contexts=False,
+                 cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01, fix_biases=False,
-                 fixed_bias=-2, repeat_attrs_over_domains=False):
+                 fixed_bias=-2, repeat_attrs_over_domains=False, activation_fn=torch.sigmoid,
+                 attr_weightdrop=0., rng_seed=None, torchfp=None, device=None):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
@@ -51,9 +72,11 @@ class DisjointDomainNet(nn.Module):
         self.merged_repr = merged_repr
         self.use_item_repr = use_item_repr
         self.use_ctx_repr = use_ctx_repr
+        self.use_ctx = use_ctx
         self.cluster_info = cluster_info
         self.last_domain_cluster_info = last_domain_cluster_info
         self.repeat_attrs_over_domains = repeat_attrs_over_domains
+        self.act_fn = activation_fn
         
         self.dummy_item = torch.zeros((1, self.n_items))
         self.dummy_ctx = torch.zeros((1, self.n_contexts))
@@ -65,21 +88,15 @@ class DisjointDomainNet(nn.Module):
 
         self.device, self.torchfp = dd.init_torch(device, torchfp)
 
-        self.item_repr_size = item_repr_units
-        self.ctx_repr_size = ctx_repr_units
+        self.item_repr_size = item_repr_units if self.use_item_repr else self.n_items
+        self.ctx_repr_size = ctx_repr_units if self.use_ctx_repr else self.n_contexts
         self.hidden_size = hidden_units
         
-        self.repr_size = item_repr_units + ctx_repr_units
+        self.repr_size = self.item_repr_size + self.ctx_repr_size
         if self.merged_repr:
             # inputs should map to full repr layer
             self.item_repr_size = self.repr_size
             self.ctx_repr_size = self.repr_size
-        else:
-            if not self.use_item_repr:
-                self.repr_size += self.n_items - item_repr_units
-
-            if not self.use_ctx_repr:
-                self.repr_size += self.n_contexts - ctx_repr_units
         
         def make_bias(n_units):
             """Make bias for a layer, either a constant or trainable parameter"""
@@ -92,16 +109,26 @@ class DisjointDomainNet(nn.Module):
         self.item_to_rep = (nn.Linear(self.n_items, self.item_repr_size, bias=False).to(device)
                             if self.use_item_repr else nn.Identity())
         self.item_rep_bias = (make_bias(self.item_repr_size)
-                              if self.use_item_repr else torch.zeros((self.n_items,)))
+                              if self.use_item_repr else torch.zeros((self.n_items,),
+                                                                    device=device))
         
-        self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size, bias=False).to(device)
-                           if self.use_ctx_repr else nn.Identity())
-        self.ctx_rep_bias = (make_bias(self.ctx_repr_size)
-                             if self.use_ctx_repr else torch.zeros((self.n_contexts,)))
+        if self.use_ctx:
+            self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size, bias=False).to(device)
+                               if self.use_ctx_repr else nn.Identity())
+            self.ctx_rep_bias = (make_bias(self.ctx_repr_size)
+                                 if self.use_ctx_repr else torch.zeros((self.n_contexts,),
+                                                                       device=device))
+        else:
+            # replace with dummies
+            def make_dummy_ctx_rep(context):
+                return torch.zeros((context.shape[0], self.ctx_repr_size), device=device)
+            self.ctx_to_rep = make_dummy_ctx_rep
+            self.ctx_rep_bias = torch.zeros((self.ctx_repr_size,), device=device)
         
         self.rep_to_hidden = nn.Linear(self.repr_size, self.hidden_size, bias=False).to(device)
         self.hidden_bias = make_bias(self.hidden_size)
-        self.hidden_to_attr = nn.Linear(self.hidden_size, self.n_attributes, bias=False).to(device)
+        self.hidden_to_attr = WeightDropLinear(self.hidden_size, self.n_attributes, bias=False,
+                                               weight_dropout=attr_weightdrop).to(device)
         self.attr_bias = make_bias(self.n_attributes)
 
         # make weights start small
@@ -130,11 +157,11 @@ class DisjointDomainNet(nn.Module):
 
     def calc_item_repr(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
-        return torch.sigmoid(self.item_to_rep(item) + self.item_rep_bias)
+        return self.act_fn(self.item_to_rep(item) + self.item_rep_bias)
     
     def calc_context_repr(self, context):
         assert self.use_ctx_repr, 'No context representation to calculate'
-        return torch.sigmoid(self.ctx_to_rep(context) + self.ctx_rep_bias)
+        return self.act_fn(self.ctx_to_rep(context) + self.ctx_rep_bias)
 
     def calc_hidden(self, item=None, context=None):
         if item is None:
@@ -149,8 +176,8 @@ class DisjointDomainNet(nn.Module):
             rep = irep + crep
         else:
             rep = torch.cat((irep, crep), dim=1)
-        rep = torch.sigmoid(rep)
-        return torch.sigmoid(self.rep_to_hidden(rep) + self.hidden_bias)
+        rep = self.act_fn(rep)
+        return self.act_fn(self.rep_to_hidden(rep) + self.hidden_bias)
 
     def forward(self, item, context):
         hidden = self.calc_hidden(item, context)
@@ -167,7 +194,7 @@ class DisjointDomainNet(nn.Module):
         (i.e. correct for unbalanced ground truth output)
         """
         total_attrs = self.attrs_per_context * self.n_contexts
-        set_attrs = 25
+        set_attrs = self.attrs_set_per_item
         unset_attrs = total_attrs - set_attrs
         
         set_weight = 0.5 / set_attrs

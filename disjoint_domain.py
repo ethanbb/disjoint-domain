@@ -482,6 +482,20 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     return item_mat, context_mat, attr_mat
 
 
+def get_mean_attr_freqs(item_mat, attr_mat):
+    # collapse attribute matrix over contexts
+    y_collapsed = item_mat.T @ attr_mat
+    
+    # for each item, combine attributes with frequency of each attribute
+    attr_freq = np.sum(y_collapsed, axis=0)
+    return (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
+
+
+def get_attr_freq_dist_mat(item_mat, attr_mat):
+    item_mean_attr_freqs = get_mean_attr_freqs(item_mat, attr_mat)
+    return np.abs(item_mean_attr_freqs[np.newaxis, :] - item_mean_attr_freqs[:, np.newaxis])
+
+
 def get_io_corr_matrix(item_mat, attr_mat, n_domains):
     """
     Computes the input-output correlation matrix for each domain (defined in Saxe paper)
@@ -548,65 +562,76 @@ def get_item_svd_loadings(item_mat, attr_mat, n_domains):
     return np.concatenate(svd_loading_list, axis=0)
 
 
+def get_item_svd_dist_mat(item_mat, attr_mat, n_domains):
+    loading_mat = get_item_svd_loadings(item_mat, attr_mat, n_domains)
+    return distance.squareform(distance.pdist(loading_mat, metric='cityblock'))
+
+
 def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
-                         attrs_set_per_item=25, cluster_info='4-2-2'):
+                         attrs_set_per_item=25, cluster_info='4-2-2', io_mats=None, figsize=(12, 6)):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
 
-    item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+    if io_mats is None:
+        item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, attrs_set_per_item,
                                                    n_domains=1, cluster_info=cluster_info)
+    else:
+        item_mat, context_mat, attr_mat = io_mats
 
-    fig = plt.figure()
+    fig = plt.figure(figsize=figsize)
 
     # plot 1: items
-    ax = fig.add_subplot(1, 20, (1, 3))
-    ax.set_title('Items')
-    ax.imshow(item_mat, aspect='auto', interpolation='nearest')
-    ax.set_yticks([])
-    ax.set_xticks(range(0, ITEMS_PER_DOMAIN, 2))
+    ax1 = fig.add_subplot(1, 20, (1, 3))
+    ax1.set_title('Items')
+    ax1.imshow(item_mat, aspect='auto', interpolation='nearest')
+    ax1.set_yticks([])
+    ax1.set_xticks(range(0, ITEMS_PER_DOMAIN, 2))
 
     # plot 2: contexts
-    ax = fig.add_subplot(1, 20, 4)
-    ax.set_title('Contexts')
-    ax.imshow(context_mat, aspect='auto', interpolation='nearest')
-    ax.set_yticks([])
-    ax.set_xticks(range(0, context_mat.shape[1], 2))
+    ax2 = fig.add_subplot(1, 20, 4)
+    ax2.set_title('Contexts')
+    ax2.imshow(context_mat, aspect='auto', interpolation='nearest')
+    ax2.set_yticks([])
+    ax2.set_xticks(range(0, context_mat.shape[1], 2))
 
     # plot 3: attributes
-    ax = fig.add_subplot(1, 20, (5, 20))
-    ax.set_title('Attributes')
-    ax.imshow(attr_mat, aspect='auto', interpolation='nearest')
-    ax.set_yticks([])
-    ax.set_xticks(range(0, attr_mat.shape[1], 10))
+    ax3 = fig.add_subplot(1, 20, (5, 20))
+    ax3.set_title('Attributes')
+    ax3.imshow(attr_mat, aspect='auto', interpolation='nearest')
+    ax3.set_yticks([])
+    ax3.set_xticks(range(0, attr_mat.shape[1], 10))
 
+    return ax1, ax2, ax3
 
 def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                           cluster_info='4-2-2'):
+                           cluster_info='4-2-2', metric='euclidean'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
 
     attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info)
-    mean_dist = np.mean(np.stack([distance.pdist(a) for a in attrs]), axis=0)
+    mean_dist = np.mean(np.stack([distance.pdist(a, metric=metric) for a in attrs]), axis=0)
     return distance.squareform(mean_dist)
 
 
-def plot_item_attribute_dendrogram(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                                   cluster_info='4-2-2', method='single', **_extra):
+def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
+                                   cluster_info='4-2-2', method='single', metric='euclidean', **_extra):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
     dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context,
-                                      attrs_set_per_item, cluster_info)
+                                      attrs_set_per_item, cluster_info, metric=metric)
     condensed_dist = distance.squareform(dist_mat)
 
     item_names = get_items(n_domains=1, cluster_info=cluster_info)[1]
 
-    fig, ax = plt.subplots()
+    if ax is None:
+        fig, ax = plt.subplots()
+
     z = hierarchy.linkage(condensed_dist, method=method)
     with plt.rc_context({'lines.linewidth': 2.5}):
         hierarchy.dendrogram(z, ax=ax, orientation='right', color_threshold=0.6 * max(z[:, 2]),
                              distance_sort='ascending', labels=np.array(item_names))
-    ax.set_title('Item attribute similarities, collapsed across contexts')
-    ax.set_xlabel('Euclidean distance')
+    ax.set_title('Item attribute dissimilarity, collapsed across contexts')
+    ax.set_xlabel(f'{metric.capitalize()} distance')
     ax.set_ylabel('Input #')
-    return fig, ax
+    return ax
 
 
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):

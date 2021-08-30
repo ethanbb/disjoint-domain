@@ -292,7 +292,7 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
 
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
-        title += f' ({title_addon})'
+        title += f'\n({title_addon})'
     ax.set_title(title)
 
     return image
@@ -432,7 +432,10 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
 
 def norm_rdm(dist_mat):
     """Helper to make a unit model RDM"""
-    return dist_mat / np.linalg.norm(dist_mat)
+    norm = np.linalg.norm(dist_mat)
+    if norm == 0:
+        return dist_mat
+    return dist_mat / norm
 
 
 def center_and_norm_rdm(dist_mat):
@@ -497,7 +500,7 @@ def make_ortho_context_rsa_models(n_domains, ctx_per_domain=4, **_extra):
     Makes a set of model RDMs for context representations. Similar to make_ortho_item_rsa_models,
     but with only the 'uniformity' and 'cross_vs_in_domain' types.
     """
-    #models = {'spread': norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
+    # models = {'spread': norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
     n_contexts = n_domains * ctx_per_domain
     models = {'uniformity': np.full((n_contexts, n_contexts), 1 / n_contexts**2)}
     
@@ -545,67 +548,49 @@ def plot_rsa_model(ax, model, input_type='item'):
     return plot_matrix_with_labels(ax, model, names, cmap='seismic', vmin=-max_absval, vmax=max_absval)
 
 
-def get_rdm_projections(res, snap_type='item', normalize=True):
+def get_rdm_projections(res, snap_type='item', models=None):
     """
     Make new "reports" (for each run, over time) of the projection of item similarity
     matrices onto the model cross-domain and domain RDM
     snap_name is the key of interest under the saved "snapshots" dict.
-    Also includes 'spread' which is just the fro-norm of the RDM.
-    If normalize is True, normalizes each RDM
-    before projecting onto each model matrix.
-    'item_full' and 'context_full' are special "snap types" that combine (concatenate) all
-    snapshots with item inputs and context inputs respectively (i.e. repr and hidden layers).
+    'item_full' and 'context_full' are special "snap types" that combine (concatenatse) all
+    snapshots with item and context inputs respectively (i.e. repr and hidden layers).
+    
+    If models are passed in, it should be a dictionary of normalized model matrices.
     """
     # Get the full snapshots (for each run)
-    with np.load(res['path'], allow_pickle=True) as resfile:
-        snap_dict = resfile['snapshots'].item()
-        if snap_type == 'item_full':
-            snaps = [snap_dict[key] for key in ['item', 'item_hidden'] if key in snap_dict]
-            snaps = np.concatenate(snaps, axis=3)
-        elif snap_type == 'context_full':
-            snaps = [snap_dict[key] for key in ['context', 'context_hidden'] if key in snap_dict]
-            snaps = np.concatenate(snaps, axis=3)
+    snaps_each = res['repr_dists'][snap_type]['snaps_each']
+
+    if models is None:
+        if 'item' in snap_type:
+            models = make_ortho_item_rsa_models(**res['net_params'])
+        elif 'context' in snap_type:
+            models = make_ortho_context_rsa_models(**res['net_params'])
         else:
-            try:
-                snaps = snap_dict[snap_type]
-            except KeyError:
-                raise ValueError(snap_type + ' snapshots not found for this dataset')
-
-    if 'item' in snap_type:
-        models = make_ortho_item_rsa_models(**res['net_params'])
-    elif 'context' in snap_type:
-        models = make_ortho_context_rsa_models(**res['net_params'])
-    else:
-        raise ValueError(f'Snapshot type {snap_type} not recognized')
+            raise ValueError(f'Snapshot type {snap_type} not recognized')
             
-    n_runs, n_snap_epochs = snaps.shape[:2]
+    n_runs, n_snap_epochs = snaps_each.shape[:2]
     projections = {dim: np.empty((n_runs, n_snap_epochs)) for dim in models}
-    projections['spread'] = np.empty((n_runs, n_snap_epochs))
     
-    for k_run in range(n_runs):
-        for k_epoch in range(n_snap_epochs):
-            rdm = distance.squareform(distance.pdist(snaps[k_run, k_epoch]))
-            
-            # make special "spread" one which is the fro norm
-            normed_rdm = np.linalg.norm(rdm)
-            projections['spread'][k_run, k_epoch] = normed_rdm
-            
-            if normalize:
-                rdm /= normed_rdm
-            
-            for dim, model in models.items():
-                projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
+    for k_run, run_snaps in zip(range(n_runs), snaps_each):
+        for k_epoch, rdm in zip(range(n_snap_epochs), run_snaps):
+            normed_rdm = center_and_norm_rdm(rdm)
 
+            for dim, model in models.items():
+                if dim == 'uniformity':
+                    projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
+                else:
+                    projections[dim][k_run, k_epoch] = np.nansum(normed_rdm * model)
     return projections
 
 
-def plot_rdm_projections(res, snap_type, axs, normalize=False, label=None, **plot_params):
+def plot_rdm_projections(res, snap_type, axs, label=None, **plot_params):
     """
     Plot time series of item or context RDM projections onto given axes, with 95% CI.
     model_types should be a list of the same size as axs.
     """    
     # get all the projections to start
-    projections = get_rdm_projections(res, snap_type, normalize=normalize)
+    projections = get_rdm_projections(res, snap_type)
     model_types = projections.keys()
     
     axs = axs.ravel()
@@ -624,8 +609,7 @@ def plot_rdm_projections(res, snap_type, axs, normalize=False, label=None, **plo
         ax.plot(res['snap_epochs'], mean, label=label, **plot_params)
         ax.fill_between(res['snap_epochs'], lower, upper, **{'alpha': 0.3, **plot_params})
         
-        ax.set_title(f'Projection of{" normalized" if normalize else ""}' + 
-                     f' {input_type} RDMs in {layer} onto {mtype} model')
+        ax.set_title(f'Projection of {input_type} RDMs in {layer} onto {mtype} model')
 
 
 def make_dict_for_regression(res_array):
@@ -710,16 +694,19 @@ def get_mean_attr_freqs(res, train_items=slice(None)):
                      for y in ys])
 
 
-def get_attr_freq_dist_mats(res, train_items=slice(None)):
+def get_attr_freq_dist_mats(res, train_items=slice(None), normalize=False):
     """
     Returns a matrix for each individual run indicating how much the mean # of 
     attributes shared with other items differs for each item pair
     """
     mean_attr_freqs = get_mean_attr_freqs(res, train_items)
-    return np.abs(mean_attr_freqs[:, np.newaxis, :] - mean_attr_freqs[:, :, np.newaxis])
+    attr_freq_dist_mats = np.abs(mean_attr_freqs[:, np.newaxis, :] - mean_attr_freqs[:, :, np.newaxis])
+    if normalize:
+        return np.stack([center_and_norm_rdm(mat) for mat in attr_freq_dist_mats])
+    return attr_freq_dist_mats
 
 
-def get_svd_dist_mats(res):
+def get_svd_dist_mats(res, normalize=False):
     """
     Returns a matrix for each individual run indicating the difference between each pair of items
     as a cityblock distance of their SVD loadings. This is supposed to capture info abount hierarchical position.
@@ -727,10 +714,10 @@ def get_svd_dist_mats(res):
     ys = res['ys']
     item_mat = dd.make_io_mats(**res['net_params'])[0]
     n_domains = res['net_params']['n_domains']
-    return np.stack([
-        distance.squareform(distance.pdist(dd.get_item_svd_loadings(item_mat, y, n_domains), metric='cityblock'))
-        for y in ys
-    ])
+    svd_dist_mats = [dd.get_item_svd_dist_mat(item_mat, y, n_domains) for y in ys]
+    if normalize:
+        return np.stack([center_and_norm_rdm(mat) for mat in svd_dist_mats])
+    return np.stack(svd_dist_mats)
 
 
 def plot_attr_freq_dist_correlation(ax, res, snap_type='item_full', train_items=slice(None),

@@ -6,7 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D # noqa
 from mpl_toolkits import axes_grid1
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
-from scipy.linalg import block_diag
+from scipy.linalg import block_diag, svd, norm
 from scipy import stats
 from sklearn.manifold import MDS
 from statsmodels.regression.linear_model import OLS
@@ -163,7 +163,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
         'snap_epochs': snap_epochs,
         'report_epochs': report_epochs,
         'etg_epochs': etg_epochs,
-        'ys': ys
+        'ys': ys,
+        'iomat_snaps': snaps['attr']
     }
 
 
@@ -238,29 +239,56 @@ def _get_names_for_snapshots(snap_type, **net_params):
         raise ValueError('Unrecognized snapshot type')
     
     return names
+
+
+def imshow_centered_bipolar(ax, mat, **imshow_args):
+    max_absval = np.max(np.abs(mat))
+    return ax.imshow(mat, cmap='seismic', vmin=-max_absval, vmax=max_absval, **imshow_args)
     
     
-def plot_matrix_with_labels(ax, mat, labels, colorbar=True, **imshow_params):
-    """Helper to plot a square matrix with each row/column labeled with 'labels'"""
+def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
+                            tick_fontsize='medium', **imshow_args):
+    """
+    Helper to plot matrix with each row labeled with 'labels' and also each column if desired.
+    """        
     n = len(labels)
-    assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
     assert n == mat.shape[0], 'Wrong number of labels'
+    if label_cols:
+        assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
     
-    image = ax.imshow(mat, **imshow_params)
-    ax.set_xticks(range(n))
-    ax.set_xticklabels(labels)
-    ax.tick_params(axis='x', labelrotation=45)
+    image = imshow_centered_bipolar(ax, mat, **imshow_args)
+
     ax.set_yticks(range(n))
     ax.set_yticklabels(labels)
     
+    if label_cols:
+        ax.tick_params(axis='x', labelrotation=45)
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(labels)
+    
     if colorbar:
         add_colorbar(image)
+        
+    for ticklabel in ax.get_xticklabels() + ax.get_yticklabels():
+        ticklabel.set_fontsize(tick_fontsize)
     
     return image
     
 
+def plot_matrix_with_input_labels(ax, mat, input_type, res=None, **plot_matrix_args):
+    """
+    Helper to plot matrix with labels corresponding to items or contexts
+    """
+    if res is None:
+        net_params = {}
+    else:
+        net_params = res['net_params']
+    labels = _get_names_for_snapshots(input_type, **net_params)
+    return plot_matrix_with_labels(ax, mat, labels, **plot_matrix_args)
+
+
 def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-outer',
-             colorbar=True, rsa_mat=None):
+             colorbar=True, rsa_mat=None, tick_fontsize='x-small'):
     """
     Plot an RSA matrix for the representation of items or contexts at a particular epoch
     item_order: controls the order of items in the matrix - either a string or an
@@ -288,7 +316,7 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
         input_names = [input_names[i] for i in perm]
         rsa_mat = rsa_mat[np.ix_(perm, perm)]
 
-    image = plot_matrix_with_labels(ax, rsa_mat, input_names, colorbar=colorbar)
+    image = plot_matrix_with_labels(ax, rsa_mat, input_names, colorbar=colorbar, tick_fontsize=tick_fontsize)
 
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
@@ -296,6 +324,95 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     ax.set_title(title)
 
     return image
+
+
+def get_item_svd_loadings(res, snap_ind, run_ind, weighted=True, n_modes=None):
+    """
+    Get SVD loading onto items of the empirical I/O matrix ('attr' snapshot) from a particular run.
+    weighted controls whether to weight each mode by its singular value.
+    n_modes allows returning only the first n modes (if not None)
+    Output is an n_items x n_modes matrix.
+    """
+    u, s, _ = svd(res['iomat_snaps'][run_ind, snap_ind, ...], full_matrices=False)
+    if weighted:
+        u = u @ np.diag(s)
+    if n_modes is not None:
+        u = u[:, :n_modes]
+    return u
+    
+
+def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, 
+                           title_addon=None, colorbar=True, tick_fontsize='x-small'):
+    """
+    Plot the SVD loadings onto items of the empirical I/O matrix from a particular run.
+    """
+    u = get_item_svd_loadings(res, snap_ind, run_ind, weighted=weighted, n_modes=n_modes)
+    image = plot_matrix_with_input_labels(ax, u, 'item', res, colorbar=colorbar,
+                                          label_cols=False, tick_fontsize=tick_fontsize)
+    ax.set_xlabel('SVD component #')
+    
+    title = f'Epoch {res["snap_epochs"][snap_ind]}'
+    if title_addon is not None:
+        title += f'\n({title_addon})'
+    ax.set_title(title)
+
+    return image
+
+
+def get_domain_mixing_score(res, snap_ind, run_ind):
+    """
+    A method of quantifying to what extent SVD modes of the empirical I/O matrix traverse
+    multiple domains.
+    - For each item loading, the L2 norm over each domain's items is computed.
+    - These individual domain norms are normalized to sum to 1
+    - The entropy of this "distribution" over domains is calculated
+    - The result is the sum of each mode's entropy, weighted by its singular value.
+    """
+    item_loadings = get_item_svd_loadings(res, snap_ind, run_ind, weighted=True)
+    svs = norm(item_loadings, axis=0)
+    weights = svs / sum(svs)
+    
+    # get the domains
+    n_items = item_loadings.shape[0]
+    dom_len = dd.ITEMS_PER_DOMAIN
+    assert n_items % dom_len == 0, 'Huh? Odd number of items'
+    n_domains = n_items // dom_len
+    
+    mode_entropies = np.zeros(len(svs))
+    for i, loading in enumerate(item_loadings.T):
+        domain_norms = np.array([
+            norm(loading[dom_len*d:dom_len*(d+1)]) for d in range(n_domains)
+        ])
+        domain_norms /= sum(domain_norms)
+        mode_entropies[i] = -sum(domain_norms * np.log2(domain_norms))
+    
+    return np.dot(weights, mode_entropies)
+
+
+def plot_domain_mixing_scores(ax, res, epoch_range=None,
+                              with_ci=True, label=None, **plot_params):
+    """Make a plot of mean domain mixing scores over epochs"""
+    iomats = res['iomat_snaps'] # runs x snaps x items x attrs
+    if epoch_range is None:
+        epoch_range = range(iomats.shape[1])
+        
+    mixing_scores = np.array([
+        [
+            get_domain_mixing_score(res, snap_ind, run_ind)
+            for snap_ind in epoch_range
+        ]
+        for run_ind in range(iomats.shape[0])
+    ])
+
+    score_mean, score_ci = get_mean_and_ci(mixing_scores)
+    xaxis = [res['snap_epochs'][e] for e in epoch_range]
+    ax.plot(xaxis, score_mean, label=label, **plot_params)
+    if with_ci:
+        ax.fill_between(xaxis, *score_ci, alpha=0.3)
+    
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Weighted domain entropy (bits)')
+    ax.set_title('Domain mixing in item SVD loadings over training')
 
 
 def plot_repr_dendrogram(ax, res, snap_type, snap_ind, title_addon=None):
@@ -418,7 +535,7 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
     
     input_names = np.concatenate(input_names)
             
-    image = ax.imshow(corrs, interpolation='nearest')
+    image = imshow_centered_bipolar(ax, corrs, interpolation='nearest')
     ax.set_yticks(range(len(input_names)))
     ax.set_yticklabels(input_names)
     ax.set_xticks([])
@@ -539,13 +656,6 @@ def test_model_validity(n_domains=4):
         print('Warning: context model RDMs do not all have unit norm.')
     else:
         print('Context model RMDs all have unit norm.')
-
-
-def plot_rsa_model(ax, model, input_type='item'):
-    """Helper to plot model RDM with a good colormap (to show 0 entries as white)"""
-    names = _get_names_for_snapshots(input_type)
-    max_absval = np.max(np.abs(model))
-    return plot_matrix_with_labels(ax, model, names, cmap='seismic', vmin=-max_absval, vmax=max_absval)
 
 
 def get_rdm_projections(res, snap_type='item', models=None):

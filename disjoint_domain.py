@@ -436,13 +436,14 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
 
 def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
                  n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None,
-                 repeat_attrs_over_domains=False, **_extra):
+                 repeat_attrs_over_domains=False, share_ctx=False, **_extra):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
     Cluster_info and last_domain_cluster_info should be valid inputs to normalize_cluster_info.
     By default (when None), last_domain_clusters is the same as clusters.
     repeat_attrs_over_domains - if True, don't regenerate attrs for each domain, just repeat them.
+    share_ctx - if True, use one bank of context units for all domains.
     """
 
     # First make it for a single domain, then use block_diag to replicate.
@@ -450,7 +451,10 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     item_mat = block_diag(*[item_mat_1 for _ in range(n_domains)])
 
     context_mat_1 = np.repeat(np.eye(ctx_per_domain), ITEMS_PER_DOMAIN, axis=0)
-    context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
+    if share_ctx:
+        context_mat = np.tile(context_mat_1, (n_domains, 1))
+    else:
+        context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
 
     if last_domain_cluster_info is None:
         last_domain_cluster_info = cluster_info
@@ -717,10 +721,14 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     return items, item_names
 
 
-def get_contexts(n_domains=4, ctx_per_domain=4, **_extra):
+def get_contexts(n_domains=4, ctx_per_domain=4, share_ctx=False, **_extra):
     """Get context tensors (without repetitions) and their corresponding names"""
-    contexts = torch.eye(ctx_per_domain * n_domains)
-    context_names = [domain_name(d) + str(n + 1) for d in range(n_domains) for n in range(ctx_per_domain)]
+    if share_ctx:
+        contexts = torch.eye(ctx_per_domain)
+        context_names = [str(n + 1) for n in range(ctx_per_domain)]
+    else:
+        contexts = torch.eye(ctx_per_domain * n_domains)
+        context_names = [domain_name(d) + str(n + 1) for d in range(n_domains) for n in range(ctx_per_domain)]
     return contexts, context_names
 
 

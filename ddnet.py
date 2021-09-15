@@ -20,7 +20,7 @@ class DisjointDomainNet(nn.Module):
     - merged_repr: Use a single representation layer for items and contexts, of size item_repr_units + ctx_repr_units
     - hidden_units: Size of (final) hidden layer
     - use_ctx: False to not have any context inputs at all (probably best with ctx_per_domain=1)
-    - share_contexts: True to use one set of context inputs for all domains instead of separate ones (WIP)
+    - share_ctx: True to use one set of context inputs for all domains instead of separate ones (WIP)
     - cluster_info: String or dict specifying item similarity structure, etc. - see dd.make_attr_vecs()
     - last_domain_cluster_info: If not None, possibly different cluster_info for the last domain
     - param_init_type: How to initialize weights and biases - 'default' (PyTorch default), 'normal' or 'uniform'
@@ -28,8 +28,9 @@ class DisjointDomainNet(nn.Module):
     - fix_biases: If True, don't use trainable biases
     - fixed_bias: Only if fix_biases is True, use this value as the fixed bias (set to 0 for no biases)
     - repeat_attrs_over_domains: Whether to reuse the exact same ground truth attributes, shifted, for each domain
-    - activation_fn: Function to use as nonlinearity for all layers except hidden-to-attr, which is always sigmoid
     - attr_weightdrop: If nonzero (but <= 1), drop hidden-to-attr weights with this probability
+    - activation_fn: Function to use as nonlinearity for all layers
+    - loss_fn: Type of loss function to use (will be initialized with reduction='sum')
     - rng_seed: Seed for the PyTorch RNG
     - torchfp: Override floating-point class to use for weights & activations
     - device: Override device (torch.device('cuda') or torch.device('cpu'))
@@ -43,7 +44,8 @@ class DisjointDomainNet(nn.Module):
             attrs_set_per_item=self.attrs_set_per_item,
             n_domains=self.n_domains, cluster_info=self.cluster_info, 
             last_domain_cluster_info=self.last_domain_cluster_info,
-            repeat_attrs_over_domains=self.repeat_attrs_over_domains)
+            repeat_attrs_over_domains=self.repeat_attrs_over_domains,
+            share_ctx=self.share_ctx)
 
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
@@ -53,22 +55,28 @@ class DisjointDomainNet(nn.Module):
 
     def __init__(self, ctx_per_domain, attrs_per_context, n_domains, attrs_set_per_item=25,
                  use_item_repr=True, item_repr_units=16, use_ctx_repr=True, ctx_repr_units=16,
-                 merged_repr=False, hidden_units=32, use_ctx=True, share_contexts=False,
+                 merged_repr=False, hidden_units=32, use_ctx=True, share_ctx=False,
                  cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01, fix_biases=False,
-                 fixed_bias=-2, repeat_attrs_over_domains=False, activation_fn=torch.sigmoid,
-                 attr_weightdrop=0., rng_seed=None, torchfp=None, device=None):
+                 fixed_bias=-2, repeat_attrs_over_domains=False, attr_weightdrop=0., 
+                 activation_fn=torch.sigmoid, loss_fn=nn.BCELoss,                 
+                 rng_seed=None, torchfp=None, device=None):
         super(DisjointDomainNet, self).__init__()
         
         assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
+
+        self.share_ctx = share_ctx
+        if self.share_ctx:
+            self.n_contexts = ctx_per_domain
+        else:
+            self.n_contexts = ctx_per_domain * n_domains
 
         self.ctx_per_domain = ctx_per_domain
         self.attrs_per_context = attrs_per_context
         self.n_domains = n_domains
         self.attrs_set_per_item = attrs_set_per_item
         self.n_items = dd.ITEMS_PER_DOMAIN * n_domains
-        self.n_contexts = ctx_per_domain * n_domains
-        self.n_attributes = attrs_per_context * self.n_contexts
+        self.n_attributes = attrs_per_context * ctx_per_domain * n_domains
         self.merged_repr = merged_repr
         self.use_item_repr = use_item_repr
         self.use_ctx_repr = use_ctx_repr
@@ -77,6 +85,7 @@ class DisjointDomainNet(nn.Module):
         self.last_domain_cluster_info = last_domain_cluster_info
         self.repeat_attrs_over_domains = repeat_attrs_over_domains
         self.act_fn = activation_fn
+        self.criterion = loss_fn(reduction='sum')
         
         self.dummy_item = torch.zeros((1, self.n_items))
         self.dummy_ctx = torch.zeros((1, self.n_contexts))
@@ -151,9 +160,7 @@ class DisjointDomainNet(nn.Module):
             n_domains=n_domains, cluster_info=self.cluster_info,
             last_domain_cluster_info=self.last_domain_cluster_info)
         self.contexts, self.context_names = dd.get_contexts(
-            n_domains=n_domains, ctx_per_domain=ctx_per_domain)
-
-        self.criterion = nn.BCELoss(reduction='sum')
+            n_domains=n_domains, ctx_per_domain=ctx_per_domain, share_ctx=self.share_ctx)
 
     def calc_item_repr(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
@@ -181,7 +188,7 @@ class DisjointDomainNet(nn.Module):
 
     def forward(self, item, context):
         hidden = self.calc_hidden(item, context)
-        attr = torch.sigmoid(self.hidden_to_attr(hidden) + self.attr_bias)
+        attr = self.act_fn(self.hidden_to_attr(hidden) + self.attr_bias)
         return attr
 
     def b_outputs_correct(self, outputs, batch_inds):
@@ -193,9 +200,8 @@ class DisjointDomainNet(nn.Module):
         For each item in the batch, find the average of accuracy for 0s and accuracy for 1s
         (i.e. correct for unbalanced ground truth output)
         """
-        total_attrs = self.attrs_per_context * self.n_contexts
         set_attrs = self.attrs_set_per_item
-        unset_attrs = total_attrs - set_attrs
+        unset_attrs = self.n_attributes - set_attrs
         
         set_weight = 0.5 / set_attrs
         unset_weight = 0.5 / unset_attrs
@@ -242,7 +248,10 @@ class DisjointDomainNet(nn.Module):
         ho_item_ind = ho_item_domain * dd.ITEMS_PER_DOMAIN + dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, 1)
         if holdout_item:
             print(f'Holding out item: {self.item_names[ho_item_ind]}')
-        ho_ctx_ind = ho_ctx_domain * self.ctx_per_domain + dd.choose_k_inds(self.ctx_per_domain, 1)
+            
+        ho_ctx_ind = dd.choose_k_inds(self.ctx_per_domain, 1)
+        if not self.share_ctx:
+            ho_ctx_ind += ho_ctx_domain * self.ctx_per_domain
         if holdout_context:
             print(f'Holding out context: {self.context_names[ho_ctx_ind]}')
 
@@ -266,7 +275,10 @@ class DisjointDomainNet(nn.Module):
         """Similar to prepare_holdout, but just hold out the last domain"""
         print(f'Holding out domain {dd.domain_name(self.n_domains-1)}')
         train_item_inds = np.arange(self.n_items - dd.ITEMS_PER_DOMAIN)
-        train_ctx_inds = np.arange(self.n_contexts - self.ctx_per_domain)
+        if self.share_ctx:
+            train_ctx_inds = np.arange(self.n_contexts)  # use all, they're shared
+        else:
+            train_ctx_inds = np.arange(self.n_contexts - self.ctx_per_domain)
         train_x_inds = np.arange(self.n_inputs - dd.ITEMS_PER_DOMAIN * self.ctx_per_domain)
         test_x_inds = np.arange(len(train_x_inds), self.n_inputs)
         
@@ -278,9 +290,13 @@ class DisjointDomainNet(nn.Module):
         Hold out a different one for each domain (assume this is possible, for now).
         """
         item_domain_starts = torch.arange(self.n_domains, device='cpu') * dd.ITEMS_PER_DOMAIN
-        ctx_domain_starts = torch.arange(self.n_domains, device='cpu') * self.ctx_per_domain
         ho_items = item_domain_starts + dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, self.n_domains)
-        ho_contexts = ctx_domain_starts + dd.choose_k_inds(self.ctx_per_domain, self.n_domains)
+        
+        ho_contexts = dd.choose_k_inds(self.ctx_per_domain, self.n_domains)
+        if not self.share_ctx:
+            # offset so one context is held out from each domain
+            ho_contexts += torch.arange(self.n_domains, device='cpu') * self.ctx_per_domain
+
         print('Holding out: ' + ', '.join(
             [f'{self.item_names[ii]}/{self.context_names[ci]}' for ii, ci in zip(ho_items, ho_contexts)]
         ))
@@ -318,6 +334,10 @@ class DisjointDomainNet(nn.Module):
 
         snaps['item_hidden'] = torch.full((n_snaps, self.n_items, self.hidden_size), np.nan)
         snaps['context_hidden'] = torch.full((n_snaps, self.n_contexts, self.hidden_size), np.nan)
+        
+        # a little different - this is the input/output correlation, so it's the average over all contexts rather than
+        # the output with zeros input for all context units.
+        snaps['attr'] = torch.full((n_snaps, self.n_items, self.n_attributes), np.nan)
         
         return snap_epochs, epoch_digits, snaps
 
@@ -459,6 +479,11 @@ class DisjointDomainNet(nn.Module):
                     
                     snaps['item_hidden'][k_snap][train_item_inds] = self.calc_hidden(item=train_items)
                     snaps['context_hidden'][k_snap][train_ctx_inds] = self.calc_hidden(context=train_contexts)
+                    
+                    # i/o correlation matrix
+                    attr_snaps = self.forward(self.x_item[train_x_inds], self.x_context[train_x_inds])
+                    item_map = self.x_item[np.ix_(train_x_inds, train_item_inds)].T / len(train_x_inds)
+                    snaps['attr'][k_snap][train_item_inds] = item_map @ attr_snaps
                     
                     if param_snapshots:
                         for pname, p in self.named_parameters():

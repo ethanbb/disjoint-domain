@@ -30,6 +30,7 @@ class DisjointDomainNet(nn.Module):
     - repeat_attrs_over_domains: Whether to reuse the exact same ground truth attributes, shifted, for each domain
     - attr_weightdrop: If nonzero (but <= 1), drop hidden-to-attr weights with this probability
     - activation_fn: Function to use as nonlinearity for all layers
+    - output_activation: If None, use same as activation_fn
     - loss_fn: Type of loss function to use (will be initialized with reduction='sum')
     - rng_seed: Seed for the PyTorch RNG
     - torchfp: Override floating-point class to use for weights & activations
@@ -59,7 +60,7 @@ class DisjointDomainNet(nn.Module):
                  cluster_info='4-2-2', last_domain_cluster_info=None,
                  param_init_type='normal', param_init_scale=0.01, fix_biases=False,
                  fixed_bias=-2, repeat_attrs_over_domains=False, attr_weightdrop=0., 
-                 activation_fn=torch.sigmoid, loss_fn=nn.BCELoss,                 
+                 activation_fn=torch.sigmoid, output_activation=None, loss_fn=nn.BCELoss,                 
                  rng_seed=None, torchfp=None, device=None):
         super(DisjointDomainNet, self).__init__()
         
@@ -85,6 +86,7 @@ class DisjointDomainNet(nn.Module):
         self.last_domain_cluster_info = last_domain_cluster_info
         self.repeat_attrs_over_domains = repeat_attrs_over_domains
         self.act_fn = activation_fn
+        self.output_act_fn = activation_fn if output_activation is None else output_activation
         self.criterion = loss_fn(reduction='sum')
         
         self.dummy_item = torch.zeros((1, self.n_items))
@@ -188,7 +190,7 @@ class DisjointDomainNet(nn.Module):
 
     def forward(self, item, context):
         hidden = self.calc_hidden(item, context)
-        attr = self.act_fn(self.hidden_to_attr(hidden) + self.attr_bias)
+        attr = self.output_act_fn(self.hidden_to_attr(hidden) + self.attr_bias)
         return attr
 
     def b_outputs_correct(self, outputs, batch_inds):

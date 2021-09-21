@@ -326,7 +326,7 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     return image
 
 
-def get_item_svd_loadings(res, snap_ind, run_ind, weighted=True, n_modes=None):
+def get_item_loadings_and_svs(res, snap_ind, run_ind, n_modes=None):
     """
     Get SVD loading onto items of the empirical I/O matrix ('attr' snapshot) from a particular run.
     weighted controls whether to weight each mode by its singular value.
@@ -334,11 +334,10 @@ def get_item_svd_loadings(res, snap_ind, run_ind, weighted=True, n_modes=None):
     Output is an n_items x n_modes matrix.
     """
     u, s, _ = svd(res['iomat_snaps'][run_ind, snap_ind, ...], full_matrices=False)
-    if weighted:
-        u = u @ np.diag(s)
     if n_modes is not None:
         u = u[:, :n_modes]
-    return u
+        s = s[:n_modes]
+    return u, s
     
 
 def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, 
@@ -346,7 +345,9 @@ def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=No
     """
     Plot the SVD loadings onto items of the empirical I/O matrix from a particular run.
     """
-    u = get_item_svd_loadings(res, snap_ind, run_ind, weighted=weighted, n_modes=n_modes)
+    u, s = get_item_loadings_and_svs(res, snap_ind, run_ind, n_modes=n_modes)
+    if weighted:
+        u = u @ np.diag(s)
     image = plot_matrix_with_input_labels(ax, u, 'item', res, colorbar=colorbar,
                                           label_cols=False, tick_fontsize=tick_fontsize)
     ax.set_xlabel('SVD component #')
@@ -368,8 +369,7 @@ def get_domain_mixing_score(res, snap_ind, run_ind):
     - The entropy of this "distribution" over domains is calculated
     - The result is the sum of each mode's entropy, weighted by its singular value.
     """
-    item_loadings = get_item_svd_loadings(res, snap_ind, run_ind, weighted=True)
-    svs = norm(item_loadings, axis=0)
+    item_loadings, svs = get_item_loadings_and_svs(res, snap_ind, run_ind)
     weights = svs / sum(svs)
     
     # get the domains
@@ -412,7 +412,39 @@ def plot_domain_mixing_scores(ax, res, epoch_range=None,
     
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Weighted domain entropy (bits)')
-    ax.set_title('Domain mixing in item SVD loadings over training')
+    ax.set_title('Domain mixing in I/O SVD loadings onto items')
+    
+
+def get_io_corr_rank(res, snap_ind, run_ind):
+    """Find the rank of an I/O correlation matrix up to 99% of the power (according to squared singular values)"""
+    _, svs = get_item_loadings_and_svs(res, snap_ind, run_ind)
+    cum_sv_power = np.cumsum(svs**2 / sum(svs**2))
+    return np.sum(cum_sv_power <= 0.99)
+
+
+def plot_io_corr_ranks(ax, res, epoch_range=None,
+                       with_ci=True, label=None, **plot_params):
+    iomats = res['iomat_snaps'] # runs x snaps x items x attrs
+    if epoch_range is None:
+        epoch_range = range(iomats.shape[1])
+        
+    corr_ranks = np.array([
+        [
+            get_io_corr_rank(res, snap_ind, run_ind)
+            for snap_ind in epoch_range
+        ]
+        for run_ind in range(iomats.shape[0])
+    ])
+
+    rank_mean, rank_ci = get_mean_and_ci(corr_ranks)
+    xaxis = [res['snap_epochs'][e] for e in epoch_range]
+    ax.plot(xaxis, rank_mean, label=label, **plot_params)
+    if with_ci:
+        ax.fill_between(xaxis, *rank_ci, alpha=0.3)
+    
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Rank to reach 99% power')
+    ax.set_title('Effective rank of I/O correlation matrix')
 
 
 def plot_repr_dendrogram(ax, res, snap_type, snap_ind, title_addon=None):

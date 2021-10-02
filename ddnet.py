@@ -80,7 +80,7 @@ class DisjointDomainNet(nn.Module):
         self.n_attributes = attrs_per_context * ctx_per_domain * n_domains
         self.merged_repr = merged_repr
         self.use_item_repr = use_item_repr
-        self.use_ctx_repr = use_ctx_repr
+        self.use_ctx_repr = use_ctx and use_ctx_repr
         self.use_ctx = use_ctx
         self.cluster_info = cluster_info
         self.last_domain_cluster_info = last_domain_cluster_info
@@ -335,7 +335,13 @@ class DisjointDomainNet(nn.Module):
             snaps['context'] = torch.full((n_snaps, self.n_contexts, self.ctx_repr_size), np.nan)
 
         snaps['item_hidden'] = torch.full((n_snaps, self.n_items, self.hidden_size), np.nan)
-        snaps['context_hidden'] = torch.full((n_snaps, self.n_contexts, self.hidden_size), np.nan)
+        if self.use_ctx:
+            snaps['context_hidden'] = torch.full((n_snaps, self.n_contexts, self.hidden_size), np.nan)
+        
+        # versions of hidden layer snapshots that average over the other inputs rather than inputting zeros
+        snaps['item_hidden_mean'] = snaps['item_hidden'].clone()
+        if self.use_ctx:
+            snaps['context_hidden_mean'] = snaps['context_hidden'].clone()
         
         # a little different - this is the input/output correlation, so it's the average over all contexts rather than
         # the output with zeros input for all context units.
@@ -473,14 +479,38 @@ class DisjointDomainNet(nn.Module):
 
                 with torch.no_grad():
                     
-                    if 'item' in snaps:
+                    if self.use_item_repr:
                         snaps['item'][k_snap][train_item_inds] = self.calc_item_repr(train_items)
                         
-                    if 'context' in snaps:
+                    if self.use_ctx_repr:
                         snaps['context'][k_snap][train_ctx_inds] = self.calc_context_repr(train_contexts)
                     
                     snaps['item_hidden'][k_snap][train_item_inds] = self.calc_hidden(item=train_items)
-                    snaps['context_hidden'][k_snap][train_ctx_inds] = self.calc_hidden(context=train_contexts)
+                    
+                    if self.use_ctx:
+                        snaps['context_hidden'][k_snap][train_ctx_inds] = self.calc_hidden(context=train_contexts)
+
+                        # versions that average over other input
+                        # items, mean over contexts
+                        for item_ind, item in zip(train_item_inds, train_items):
+                            x_inds = np.flatnonzero(self.x_item.eq(item).all(axis=1).cpu())
+                            x_inds = np.intersect1d(x_inds, train_x_inds)
+                            ctxs = self.x_context[x_inds]
+                            items = item.unsqueeze(0).expand_as(ctxs)
+                            hidden_reps = self.calc_hidden(item=items, context=ctxs)
+                            snaps['item_hidden_mean'][k_snap][item_ind] = torch.mean(hidden_reps, dim=0)
+
+                        # contexts, mean over items
+                        for ctx_ind, ctx in zip(train_ctx_inds, train_contexts):
+                            x_inds = np.flatnonzero(self.x_context.eq(ctx).all(axis=1).cpu())
+                            x_inds = np.intersect1d(x_inds, train_x_inds)
+                            items = self.x_item[x_inds]
+                            ctxs= ctx.unsqueeze(0).expand_as(items)
+                            hidden_reps = self.calc_hidden(item=items, context=ctxs)
+                            snaps['context_hidden_mean'][k_snap][ctx_ind] = torch.mean(hidden_reps, dim=0)
+
+                    else:  # mean over contexts is the same as dummy context if there are no contexts at all
+                        snaps['item_hidden_mean'][k_snap] = snaps['item_hidden'][k_snap]
                     
                     # i/o correlation matrix
                     attr_snaps = self.forward(self.x_item[train_x_inds], self.x_context[train_x_inds])

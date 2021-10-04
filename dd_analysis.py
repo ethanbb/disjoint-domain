@@ -100,7 +100,10 @@ def get_mean_and_ci(series_set):
     n = series_set.shape[0]
     mean = np.mean(series_set, axis=0)
     stderr = np.std(series_set, axis=0) / np.sqrt(n)
-    interval = stats.t.interval(0.95, df=n-1, loc=mean, scale=stderr)
+    interval = np.stack([
+        stats.t.interval(0.95, df=n-1, loc=m, scale=std) if std > 0 else (m, m)
+        for (m, std) in zip(mean, stderr)
+    ], axis=1)
     
     return mean, interval
 
@@ -479,7 +482,7 @@ def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
     
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Weighted domain entropy (bits)')
-    ax.set_title('Domain mixing in I/O SVD loadings onto items')
+    ax.set_title(f'Domain mixing in I/O SVD loadings onto items ({layer} layer)')
     
 
 def get_io_corr_rank(res, snap_ind, run_ind, layer='attr'):
@@ -511,7 +514,7 @@ def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr',
     
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Rank to reach 99% power')
-    ax.set_title('Effective rank of I/O correlation matrix')
+    ax.set_title(f'Effective rank of I/O correlation matrix ({layer} layer)')
     
     
 def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer):
@@ -576,7 +579,7 @@ def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
     
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Score of full vs. domain rank ratio')
-    ax.set_title('Domain mixing (0-1) based on SVD rank')
+    ax.set_title(f'Domain mixing (0-1) based on SVD rank ({layer} layer)')
 
 
 def plot_repr_dendrogram(ax, res, snap_type, snap_ind, title_addon=None):

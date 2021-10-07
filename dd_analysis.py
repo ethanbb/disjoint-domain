@@ -12,6 +12,7 @@ from sklearn.manifold import MDS
 from sklearn.decomposition import NMF
 from statsmodels.regression.linear_model import OLS
 from patsy import dmatrices
+import torch
 
 import disjoint_domain as dd
 
@@ -25,6 +26,10 @@ report_titles = {
     'test_accuracy': 'Accuracy on novel item/context pairs',
     'test_weighted_acc': 'Mean generalization accuracy (weighted)'
 }
+
+
+def inv_sigmoid(x):
+    return -np.log(1/x - 1)
 
 
 def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
@@ -133,14 +138,19 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
     }
     
     # also do full item and context repr dists
-    item_full_snaps = np.concatenate([snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps],
-                                     axis=3)
-    mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric,
-                                                       calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
-    ctx_full_snaps = np.concatenate([snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps],
-                                    axis=3)
-    mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
-                                                          calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
+    item_snaps = [snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps]
+    if len(item_snaps) > 0:
+        item_full_snaps = np.concatenate(item_snaps, axis=3)
+        mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric,
+                                                           calc_all=calc_all_repr_dists,
+                                                           include_individual=include_individual_rdms)
+    
+    ctx_snaps = [snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps]
+    if len(ctx_snaps) > 0:
+        ctx_full_snaps = np.concatenate(ctx_snaps, axis=3)
+        mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
+                                                              calc_all=calc_all_repr_dists,
+                                                              include_individual=include_individual_rdms)
 
     report_stats = {
         report_type: get_mean_and_ci(report)
@@ -158,13 +168,22 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
     etg_epochs = report_epochs[::train_params['reports_per_test']]
     
     # dict of individual snapshots that are normalized as empirical (partial) I/O matrices
-    iomat_snaps = {'attr': snaps['attr']}
+    iomat_snaps = dict()
+    if 'attr' in snaps:
+        iomat_snaps['attr'] = snaps['attr']
+    if 'attr_preact' in snaps:
+        iomat_snaps['attr_preact'] = snaps['attr_preact']
     
     if 'use_item_repr' not in net_params or net_params['use_item_repr']:
         iomat_snaps['repr'] = snaps['item'] / snaps['item'].shape[2]
-    
+        if 'item_preact' in snaps:
+            iomat_snaps['repr_preact'] = snaps['item_preact'] / snaps['item_preact'].shape[2]
+        
     if 'item_hidden_mean' in snaps:
         iomat_snaps['hidden'] = snaps['item_hidden_mean'] / snaps['item_hidden_mean'].shape[2]
+        if 'item_hidden_mean_preact' in snaps:
+            iomat_snaps['hidden_preact'] = snaps['item_hidden_mean_preact'] / snaps['item_hidden_mean_preact'].shape[2]
+
     elif 'use_ctx' in net_params and not net_params['use_ctx']:
         iomat_snaps['hidden'] = snaps['item_hidden'] / snaps['item_hidden'].shape[2]
         
@@ -246,7 +265,7 @@ def plot_individual_reports(ax, res, all_reports, report_type, **plot_params):
     
 def _get_names_for_snapshots(snap_type, **net_params):
     """Helper to retrieve input names depending on the type of snapshot"""
-    if 'item' in snap_type:
+    if 'item' in snap_type or 'attr' in snap_type:
         names = dd.get_items(**net_params)[1]
     elif 'context' in snap_type:
         names = dd.get_contexts(**net_params)[1]

@@ -164,15 +164,15 @@ class DisjointDomainNet(nn.Module):
         self.contexts, self.context_names = dd.get_contexts(
             n_domains=n_domains, ctx_per_domain=ctx_per_domain, share_ctx=self.share_ctx)
 
-    def calc_item_repr(self, item):
+    def calc_item_repr_preact(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
-        return self.act_fn(self.item_to_rep(item) + self.item_rep_bias)
+        return self.item_to_rep(item) + self.item_rep_bias
     
-    def calc_context_repr(self, context):
+    def calc_context_repr_preact(self, context):
         assert self.use_ctx_repr, 'No context representation to calculate'
-        return self.act_fn(self.ctx_to_rep(context) + self.ctx_rep_bias)
+        return self.ctx_to_rep(context) + self.ctx_rep_bias
 
-    def calc_hidden(self, item=None, context=None):
+    def calc_hidden_preact(self, item=None, context=None):
         if item is None:
             item = self.dummy_item.repeat((context.shape[0] if context is not None else 1), 1)
         if context is None:
@@ -186,12 +186,14 @@ class DisjointDomainNet(nn.Module):
         else:
             rep = torch.cat((irep, crep), dim=1)
         rep = self.act_fn(rep)
-        return self.act_fn(self.rep_to_hidden(rep) + self.hidden_bias)
+        return self.rep_to_hidden(rep) + self.hidden_bias
 
+    def calc_attr_preact(self, item, context):
+        hidden = self.act_fn(self.calc_hidden_preact(item, context))
+        return self.hidden_to_attr(hidden) + self.attr_bias
+    
     def forward(self, item, context):
-        hidden = self.calc_hidden(item, context)
-        attr = self.output_act_fn(self.hidden_to_attr(hidden) + self.attr_bias)
-        return attr
+        return self.output_act_fn(self.calc_attr_preact(item, context))
 
     def b_outputs_correct(self, outputs, batch_inds):
         """Element-wise function to find which outputs are correct for a batch"""
@@ -331,8 +333,10 @@ class DisjointDomainNet(nn.Module):
         snaps = {}
         if self.use_item_repr:
             snaps['item'] = torch.full((n_snaps, self.n_items, self.item_repr_size), np.nan)
+            snaps['item_preact'] = snaps['item'].clone()
         if self.use_ctx_repr:
             snaps['context'] = torch.full((n_snaps, self.n_contexts, self.ctx_repr_size), np.nan)
+            snaps['context_preact'] = snaps['context'].clone()
 
         snaps['item_hidden'] = torch.full((n_snaps, self.n_items, self.hidden_size), np.nan)
         if self.use_ctx:
@@ -340,12 +344,15 @@ class DisjointDomainNet(nn.Module):
         
         # versions of hidden layer snapshots that average over the other inputs rather than inputting zeros
         snaps['item_hidden_mean'] = snaps['item_hidden'].clone()
+        snaps['item_hidden_mean_preact'] = snaps['item_hidden'].clone()
         if self.use_ctx:
             snaps['context_hidden_mean'] = snaps['context_hidden'].clone()
+            snaps['context_hidden_mean_preact'] = snaps['context_hidden'].clone()
         
         # a little different - this is the input/output correlation, so it's the average over all contexts rather than
         # the output with zeros input for all context units.
         snaps['attr'] = torch.full((n_snaps, self.n_items, self.n_attributes), np.nan)
+        snaps['attr_preact'] = snaps['attr'].clone()
         
         return snap_epochs, epoch_digits, snaps
 
@@ -480,15 +487,18 @@ class DisjointDomainNet(nn.Module):
                 with torch.no_grad():
                     
                     if self.use_item_repr:
-                        snaps['item'][k_snap][train_item_inds] = self.calc_item_repr(train_items)
+                        snaps['item_preact'][k_snap][train_item_inds] = self.calc_item_repr_preact(train_items)
+                        snaps['item'][k_snap][train_item_inds] = self.act_fn(snaps['item_preact'][k_snap][train_item_inds])
                         
                     if self.use_ctx_repr:
-                        snaps['context'][k_snap][train_ctx_inds] = self.calc_context_repr(train_contexts)
+                        snaps['context_preact'][k_snap][train_ctx_inds] = self.calc_context_repr_preact(train_contexts)
+                        snaps['context'][k_snap][train_ctx_inds] = self.act_fn(snaps['context_preact'][k_snap][train_ctx_inds])
                     
-                    snaps['item_hidden'][k_snap][train_item_inds] = self.calc_hidden(item=train_items)
+                    item_hidden_snaps_preact = self.calc_hidden_preact(item=train_items)
+                    snaps['item_hidden'][k_snap][train_item_inds] = self.act_fn(item_hidden_snaps_preact)
                     
                     if self.use_ctx:
-                        snaps['context_hidden'][k_snap][train_ctx_inds] = self.calc_hidden(context=train_contexts)
+                        snaps['context_hidden'][k_snap][train_ctx_inds] = self.act_fn(self.calc_hidden_preact(context=train_contexts))
 
                         # versions that average over other input
                         # items, mean over contexts
@@ -497,8 +507,9 @@ class DisjointDomainNet(nn.Module):
                             x_inds = np.intersect1d(x_inds, train_x_inds)
                             ctxs = self.x_context[x_inds]
                             items = item.unsqueeze(0).expand_as(ctxs)
-                            hidden_reps = self.calc_hidden(item=items, context=ctxs)
-                            snaps['item_hidden_mean'][k_snap][item_ind] = torch.mean(hidden_reps, dim=0)
+                            hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
+                            snaps['item_hidden_mean_preact'][k_snap][item_ind] = torch.mean(hidden_reps, dim=0)
+                            snaps['item_hidden_mean'][k_snap][item_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)
 
                         # contexts, mean over items
                         for ctx_ind, ctx in zip(train_ctx_inds, train_contexts):
@@ -506,16 +517,19 @@ class DisjointDomainNet(nn.Module):
                             x_inds = np.intersect1d(x_inds, train_x_inds)
                             items = self.x_item[x_inds]
                             ctxs= ctx.unsqueeze(0).expand_as(items)
-                            hidden_reps = self.calc_hidden(item=items, context=ctxs)
-                            snaps['context_hidden_mean'][k_snap][ctx_ind] = torch.mean(hidden_reps, dim=0)
+                            hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
+                            snaps['context_hidden_mean_preact'][k_snap][ctx_ind] = torch.mean(hidden_reps, dim=0)
+                            snaps['context_hidden_mean'][k_snap][ctx_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)
 
                     else:  # mean over contexts is the same as dummy context if there are no contexts at all
                         snaps['item_hidden_mean'][k_snap] = snaps['item_hidden'][k_snap]
+                        snaps['item_hidden_mean_preact'][k_snap][train_item_inds] = item_hidden_snaps_preact
                     
                     # i/o correlation matrix
-                    attr_snaps = self.forward(self.x_item[train_x_inds], self.x_context[train_x_inds])
+                    attr_snaps_preact = self.calc_attr_preact(self.x_item[train_x_inds], self.x_context[train_x_inds])
                     item_map = self.x_item[np.ix_(train_x_inds, train_item_inds)].T / len(train_x_inds)
-                    snaps['attr'][k_snap][train_item_inds] = item_map @ attr_snaps
+                    snaps['attr_preact'][k_snap][train_item_inds] = item_map @ attr_snaps_preact
+                    snaps['attr'][k_snap][train_item_inds] = item_map @ self.output_act_fn(attr_snaps_preact)
                     
                     if param_snapshots:
                         for pname, p in self.named_parameters():

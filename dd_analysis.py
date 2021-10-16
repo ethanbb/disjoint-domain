@@ -127,6 +127,10 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
         train_params = resfile['train_params'].item()
         ys = resfile['ys']
         
+    for possible_fn in ['cluster_info', 'last_domain_cluster_info']:
+        if possible_fn in net_params and callable(net_params[possible_fn]):
+            net_params[possible_fn] = net_params[possible_fn]()
+        
     # take subset of snaps and reports if necessary
     snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
@@ -361,14 +365,18 @@ def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-
     return image
 
 
-def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr'):
+def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr', center=False):
     """
     Get SVD loading onto items of the empirical I/O matrix ('attr' snapshot) from a particular run.
     weighted controls whether to weight each mode by its singular value.
     n_modes allows returning only the first n modes (if not None)
     Output is an n_items x n_modes matrix.
     """
-    u, s, vd = svd(res['iomat_snaps'][layer][run_ind, snap_ind, ...], full_matrices=False)
+    mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
+    if center:
+        mat = mat - np.mean(mat, axis=0)
+
+    u, s, vd = svd(mat, full_matrices=False)
     if n_modes is not None:
         u = u[:, :n_modes]
         s = s[:n_modes]
@@ -376,16 +384,18 @@ def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer
     return u, s, vd
     
 
-def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, layer='attr',
+def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, layer='attr', center=False,
                            title_addon=None, colorbar=True, tick_fontsize='x-small'):
     """
     Plot the SVD loadings onto items of the empirical I/O matrix from a particular run.
     """
-    u, s = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=n_modes, layer=layer)[:2]
+    u, s = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=n_modes, layer=layer, center=center)[:2]
     if weighted:
         u = u @ np.diag(s)
     image = plot_matrix_with_input_labels(ax, u, 'item', res, colorbar=colorbar,
                                           label_cols=False, tick_fontsize=tick_fontsize)
+#     image = ax.imshow(u)
+#     add_colorbar(image)
     ax.set_xlabel('SVD component #')
     
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
@@ -396,12 +406,12 @@ def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=No
     return image
 
 
-def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=None, layer='attr',
+def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=None, layer='attr', center=False,
                          title_addon=None, colorbar=True, tick_fontsize='x-small'):
     """
     Plot the SVD loadings onto attributes of the empirical I/O matrix from a particular run.
     """
-    s, vd = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=n_modes, layer=layer)[1:]
+    s, vd = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=n_modes, layer=layer, center=center)[1:]
     if weighted:
         vd = np.diag(s) @ vd
 
@@ -506,7 +516,7 @@ def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
 
 def get_io_corr_rank(res, snap_ind, run_ind, layer='attr'):
     """Find the rank of an I/O correlation matrix up to 99% of the power (according to squared singular values)"""
-    svs = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, layer=layer)[1]
+    svs = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, layer=layer, center=True)[1]
     cum_sv_power = np.cumsum(svs**2 / sum(svs**2))
     return np.sum(cum_sv_power <= 0.99) + 1
 
@@ -546,6 +556,7 @@ def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer):
     """
     try:
         mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
+        mat = mat - np.mean(mat, axis=0)
     except KeyError:
          raise ValueError('Given results do not have I/O matrix information for the requested layer.')
     

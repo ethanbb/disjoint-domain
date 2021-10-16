@@ -384,7 +384,7 @@ def normalize_cluster_info(cluster_info):
     If input is a string, the part before the first underscore is interpreted as 'clusters'
     and each underscore-separated string after the the first (if any)
     becomes an element of the list in 'special'.
-    """
+    """   
     if isinstance(cluster_info, str):
         clusters, *special = cluster_info.split('_')
         return {'clusters': clusters, 'special': special}
@@ -393,7 +393,17 @@ def normalize_cluster_info(cluster_info):
 
 
 def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info):
-    """Wrapper to make any set of attr vectors (returns a list of one matrix per context)"""
+    """
+    Wrapper to make any set of attr vectors (returns a list of one matrix per context)
+    If cluster_info is a list, should be of length ctx_per_domain. In this case the corrresponding
+    cluster info is used to generate each context's attributes.
+    """
+    if isinstance(cluster_info, list):
+        assert len(cluster_info) == ctx_per_domain, (
+            f'Length of cluster_info {len(cluster_info)} does not match number of contexts {ctx_per_domain}')
+        # Generate attribute vectors for each context individually and concatenate
+        return sum([make_attr_vecs(1, attrs_per_context, attrs_set_per_item, cifo) for cifo in cluster_info], [])
+    
     if attrs_set_per_item > attrs_per_context:
         raise ValueError('Cannot set more attrs per item than # allocated to each context')
 
@@ -430,6 +440,9 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         except KeyError:
             item_weights = None
         attr_vecs = [_resample_attr_vec_mat(mat, item_weights) for mat in attr_vecs]
+        
+    if 'item_permutation' in cluster_info:
+        attr_vecs = [mat[cluster_info['item_permutation'], :] for mat in attr_vecs]
 
     return attr_vecs
 
@@ -461,9 +474,6 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
         last_is_same = True
     else:
         last_is_same = False
-
-    cluster_info = normalize_cluster_info(cluster_info)
-    last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
 
     if repeat_attrs_over_domains:
         domain_attrs = make_attr_vecs(ctx_per_domain, attrs_per_context,
@@ -705,6 +715,13 @@ def get_domain_colors():
 
 def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
+    if isinstance(cluster_info, list):
+        # Can't assign symbols because the clusters vary over contexts
+        cluster_info = '8'
+        
+    if isinstance(last_domain_cluster_info, list):
+        last_domain_cluster_info = '8'
+    
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
                                 else normalize_cluster_info(last_domain_cluster_info))
@@ -712,7 +729,6 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
     all_clusters = [cluster_info['clusters']] * n_domains
     if last_domain_cluster_info is not None:
-        last_domain_cluster_info = normalize_cluster_info(last_domain_cluster_info)
         all_clusters[-1] = last_domain_cluster_info['clusters']
 
     item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, clst)

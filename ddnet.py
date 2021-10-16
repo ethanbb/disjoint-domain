@@ -82,7 +82,11 @@ class DisjointDomainNet(nn.Module):
         self.use_item_repr = use_item_repr
         self.use_ctx_repr = use_ctx and use_ctx_repr
         self.use_ctx = use_ctx
+        if callable(cluster_info):
+            cluster_info = cluster_info()
         self.cluster_info = cluster_info
+        if callable(last_domain_cluster_info):
+            last_domain_cluster_info = last_domain_cluster_info()
         self.last_domain_cluster_info = last_domain_cluster_info
         self.repeat_attrs_over_domains = repeat_attrs_over_domains
         self.act_fn = activation_fn
@@ -506,7 +510,7 @@ class DisjointDomainNet(nn.Module):
                             x_inds = np.flatnonzero(self.x_item.eq(item).all(axis=1).cpu())
                             x_inds = np.intersect1d(x_inds, train_x_inds)
                             ctxs = self.x_context[x_inds]
-                            items = item.unsqueeze(0).expand_as(ctxs)
+                            items = item.unsqueeze(0).expand(len(ctxs), -1)
                             hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
                             snaps['item_hidden_mean_preact'][k_snap][item_ind] = torch.mean(hidden_reps, dim=0)
                             snaps['item_hidden_mean'][k_snap][item_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)
@@ -516,7 +520,7 @@ class DisjointDomainNet(nn.Module):
                             x_inds = np.flatnonzero(self.x_context.eq(ctx).all(axis=1).cpu())
                             x_inds = np.intersect1d(x_inds, train_x_inds)
                             items = self.x_item[x_inds]
-                            ctxs= ctx.unsqueeze(0).expand_as(items)
+                            ctxs= ctx.unsqueeze(0).expand(len(items), -1)
                             hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
                             snaps['context_hidden_mean_preact'][k_snap][ctx_ind] = torch.mean(hidden_reps, dim=0)
                             snaps['context_hidden_mean'][k_snap][ctx_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)

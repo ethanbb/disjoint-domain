@@ -1,4 +1,5 @@
 from typing import List, Literal
+import numpy as np
 
 
 class Couple:
@@ -73,7 +74,7 @@ class FamilyMember:
         my_side = get_own_siblings_with_inlaws(self)
         spouses = self.get_spouses()
         spouses_side = get_own_siblings_with_inlaws(spouses[0]) if len(spouses) > 0 else []
-        return my_side + spouses_side
+        return list(set(my_side + spouses_side))
 
     def get_piblings(self):
         """pibliings = aunts and uncles"""
@@ -87,19 +88,31 @@ class FamilyMember:
 
     def get_niblings(self):
         """niblings = nieces and nephews"""
-        return sum([sib.get_children() for sib in self.get_siblings_w_inlaws()], [])
+        return list(set(sum([sib.get_children() for sib in self.get_siblings_w_inlaws()], [])))
 
     def get_nephews(self):
         return [nib for nib in self.get_niblings() if nib.sex == 'm']
 
     def get_nieces(self):
         return [nib for nib in self.get_niblings() if nib.sex == 'f']
+    
+    # Set of functions to compute relationships, in the order they are encoded in relationship input units
+    relationship_fns = [
+        get_fathers, get_mothers,
+        get_husbands, get_wives,
+        get_sons, get_daughters,
+        get_brothers, get_sisters,
+        get_uncles, get_aunts,
+        get_nephews, get_nieces
+    ]
 
 
 class FamilyTree:
     def __init__(self, members: List[FamilyMember], couples: List[Couple], validate=True):
         self.members = members
         self.couples = couples
+        self.size = len(members)
+        self.member_index = {member: i for (i, member) in enumerate(members)}
 
         if validate:
             for member in members:
@@ -109,6 +122,48 @@ class FamilyTree:
             for couple in couples:
                 for child in couple.children:
                     assert child in members, f'Tree invalid - child {child.name} not in members list'
+        
+    def __repr__(self):
+        return f'FamilyTree({self.members!r}, {self.couples!r})'
+    
+    
+    def get_nonempty_related_members_mat(self, subject: FamilyMember, zeros_fn=np.zeros):
+        """
+        Get a matrix of which other family members are related to the subject by each relationship
+        for which there is at least one related member, along with the corresponding matrix of relationship indices
+        """
+        related_members = [fn(subject) for fn in FamilyMember.relationship_fns]
+        rel_member_pairs = [(rel_ind, membs) for rel_ind, membs in enumerate(related_members) if len(membs) > 0]
+        n_rels = len(rel_member_pairs)
+        
+        rel_mat = zeros_fn((n_rels, len(FamilyMember.relationship_fns)))
+        member_mat = zeros_fn((n_rels, self.size))
+        for i, (rel_ind, membs) in enumerate(rel_member_pairs):
+            rel_mat[i, rel_ind] = 1
+            for member in membs:
+                member_mat[i, self.member_index[member]] = 1
+        
+        return rel_mat, member_mat
+    
+    def get_io_mats(self, zeros_fn=np.zeros, cat_fn=np.concatenate):
+        """Get matrices encoding person1, relationship, and person2 for whole tree"""
+        person1_mats = []
+        rel_mats = []
+        person2_mats = []
+        
+        for i, subject in enumerate(self.members):
+            rel_mat, member_mat = self.get_nonempty_related_members_mat(subject, zeros_fn=zeros_fn)
+            subj_mat = zeros_fn((rel_mat.shape[0], self.size))
+            subj_mat[:, i] = 1
+            person1_mats.append(subj_mat)
+            rel_mats.append(rel_mat)
+            person2_mats.append(member_mat)
+        
+        person1_mat = cat_fn(person1_mats, 0)
+        rel_mat = cat_fn(rel_mats, 0)
+        person2_mat = cat_fn(person2_mats, 0)
+        
+        return person1_mat, rel_mat, person2_mat
 
 
 def get_hinton_tree(italian=False):

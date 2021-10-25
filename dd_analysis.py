@@ -514,14 +514,14 @@ def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
     ax.set_title(f'Domain mixing in I/O SVD loadings onto items ({layer} layer)')
     
 
-def get_io_corr_rank(res, snap_ind, run_ind, layer='attr'):
+def get_io_corr_rank(res, snap_ind, run_ind, layer='attr', center=True):
     """Find the rank of an I/O correlation matrix up to 99% of the power (according to squared singular values)"""
-    svs = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, layer=layer, center=True)[1]
+    svs = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, layer=layer, center=center)[1]
     cum_sv_power = np.cumsum(svs**2 / sum(svs**2))
     return np.sum(cum_sv_power <= 0.99) + 1
 
 
-def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr',
+def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr', center=True,
                        with_ci=True, label=None, **plot_params):
     iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
@@ -529,7 +529,7 @@ def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr',
         
     corr_ranks = np.array([
         [
-            get_io_corr_rank(res, snap_ind, run_ind, layer=layer)
+            get_io_corr_rank(res, snap_ind, run_ind, layer=layer, center=center)
             for snap_ind in epoch_range
         ]
         for run_ind in range(iomats.shape[0])
@@ -546,7 +546,7 @@ def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr',
     ax.set_title(f'Effective rank of I/O correlation matrix ({layer} layer)')
     
     
-def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer):
+def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer, center=True):
     """
     Evaluate shared information across domains by looking at the SVD rank (up to 99% power)
     of the full I/O matrix vs. submatrices corresponding to individual domains.
@@ -556,11 +556,12 @@ def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer):
     """
     try:
         mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
-        mat = mat - np.mean(mat, axis=0)
+        if center:
+            mat = mat - np.mean(mat, axis=0)
     except KeyError:
          raise ValueError('Given results do not have I/O matrix information for the requested layer.')
     
-    full_mat_rank = get_io_corr_rank(res, snap_ind, run_ind, layer=layer)
+    full_mat_rank = get_io_corr_rank(res, snap_ind, run_ind, layer=layer, center=center)
     
     n_domains = res['net_params']['n_domains']
     sub_mats = np.split(mat, n_domains, axis=0)  # splitting by items
@@ -581,9 +582,12 @@ def get_rank_domain_mixing_score(res, snap_ind, run_ind, layer):
     if n_domains < 2:
         raise ValueError('Cannot score domain mixing with just one domain')
     
-    rank_ratio = get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer)
+    rank_ratio = get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer, center=True)
+    svs = get_item_loadings_svs_and_scores(res, snap_ind, run_ind, layer=layer, center=True)[1]
+    total_var = sum((svs**2))
     rank_score = n_domains - rank_ratio
     rank_score /= (n_domains - 1)
+    rank_score *= total_var
     return rank_score
 
 
@@ -609,7 +613,7 @@ def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
     
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Score of full vs. domain rank ratio')
-    ax.set_title(f'Domain mixing (0-1) based on SVD rank ({layer} layer)')
+    ax.set_title(f'Domain mixing based on SVD rank ({layer} layer)')
 
 
 def plot_repr_dendrogram(ax, res, snap_type, snap_ind, title_addon=None):

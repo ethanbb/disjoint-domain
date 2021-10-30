@@ -5,6 +5,41 @@ import numpy as np
 from datetime import datetime as dt
 
 
+net_defaults = {
+    'single_tree': False,
+    'share_rel_units': True,
+    'person1_repr_units': 6,
+    'rel_repr_units': 6,
+    'hidden_units': 12,
+    'preoutput_units': 6,
+    'use_preoutput': False,
+    'use_biases': True,
+    'target_offset': 0.2,
+    'weight_init_type': 'uniform',
+    'weight_init_range': 1/12,
+    'weight_init_offset': 1/24,
+    'bias_init_type': 'uniform',
+    'bias_init_range': 0.001,
+    'bias_init_offset': 0.0005,
+    'act_fn': torch.relu,
+    'loss_fn': nn.MSELoss,
+    'loss_reduction': 'sum',
+    'seed': None,
+    'device': None,
+    'torchfp': None
+}
+
+train_defaults = {
+    'num_epochs': 5000,
+    'lr': 0.003,
+    'momentum': 0,
+    'weight_decay': 0,
+    'n_holdout': 4,
+    'report_freq': 50,
+    'batch_size': 0
+}
+
+
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
     """Establish floating-point type and device to use with Pytorch"""
     
@@ -43,31 +78,31 @@ class FamilyTreeNet(nn.Module):
     In this version, for simplicity, all tests are on the "English" tree.
     - single_tree: Train (and test) on English tree alone rather than both English and Italian
     - X_units: Size of X layer
-    - param_init_scale: Uniform weight initialization is +/- this value
+    - weight_init_scale: Uniform weight initialization is +/- this value
+    - target_offset: If using sigmoid activations, how much to add to the target 0s and subtract from target 1s for loss fn
     - rng_seed: Provide an RNG seed to replicate previous results; if none, uses a random one.
     - device: Override default device ('cuda'/'cpu') for pytorch
     - torchfp: Override default floating-point type (torch.float/torch.double)
     """   
     
-    def __init__(self, single_tree=False, person1_repr_units=6, rel_repr_units=6,
-                 hidden_units=12, preoutput_units=6, use_biases=False,
-                 param_init_type='uniform', param_init_scale=0.3, param_init_offset=0,
-                 act_fn=torch.sigmoid, loss_fn=nn.MSELoss, loss_reduction='sum',
-                 rng_seed=None, device=None, torchfp=None):
+    def __init__(self, **net_params):
         super(FamilyTreeNet, self).__init__()
-        
-        self.single_tree = single_tree
-        self.device, self.torchfp, self.zeros_fn = init_torch(device, torchfp)
+
+        # Merge default params with overrides and make them properties
+        net_params = {**net_defaults, **net_params}
+        for key, val in net_params.items():
+            setattr(self, key, val)
+
+        self.device, self.torchfp, self.zeros_fn = init_torch(self.device, self.torchfp)
         if self.device.type == 'cuda':
             print('Using CUDA')
         else:
             print('Using CPU')
         
-        if rng_seed is None:
+        if self.seed is None:
             self.seed = torch.seed()
         else:
-            self.seed = rng_seed
-            torch.manual_seed(rng_seed)
+            torch.manual_seed(self.seed)
         
         # Get training tensors
         english_tree = familytree.get_hinton_tree()
@@ -80,7 +115,10 @@ class FamilyTreeNet(nn.Module):
             person1_italian, rel_italian, person2_italian = italian_tree.get_io_mats(zeros_fn=self.zeros_fn, cat_fn=torch.cat)
             
             person1_mat = torch.block_diag(person1_mat, person1_italian)
-            rel_mat = torch.cat((rel_mat, rel_italian), 0)
+            if self.share_rel_units:
+                rel_mat = torch.cat((rel_mat, rel_italian), 0)
+            else:
+                rel_mat = torch.block_diag(rel_mat, rel_italian)
             person2_mat = torch.block_diag(person2_mat, person2_italian)
         
         person1_units = person1_mat.shape[1]
@@ -94,44 +132,67 @@ class FamilyTreeNet(nn.Module):
         self.n_inputs = person1_mat.shape[0]
             
         # Make layers
-        self.person1_to_repr = nn.Linear(person1_units, person1_repr_units, bias=use_biases).to(self.device)
-        self.rel_to_repr = nn.Linear(rel_units, rel_repr_units, bias=use_biases).to(self.device)
-        total_repr_units = person1_repr_units + rel_repr_units
-        self.repr_to_hidden = nn.Linear(total_repr_units, hidden_units, bias=use_biases).to(self.device)
-        self.hidden_to_preoutput = nn.Linear(hidden_units, preoutput_units, bias=use_biases).to(self.device)
-        self.preoutput_to_person2 = nn.Linear(preoutput_units, person2_units, bias=use_biases).to(self.device)
-        # self.hidden_to_person2 = nn.Linear(hidden_units, person2_units, bias=use_biases).to(self.device)
-        
-        # Activation function
-        self.act_fn = act_fn
+        def make_layer(in_size, out_size):
+            return nn.Linear(in_size, out_size, bias=self.use_biases).to(self.device)
+
+        self.person1_to_repr = make_layer(person1_units, self.person1_repr_units)
+        self.rel_to_repr = make_layer(rel_units, self.rel_repr_units)
+        total_repr_units = self.person1_repr_units + self.rel_repr_units
+        self.repr_to_hidden = make_layer(total_repr_units, self.hidden_units)
+
+        if self.use_preoutput:
+            self.hidden_to_preoutput = make_layer(self.hidden_units, self.preoutput_units)
+            self.preoutput_to_person2 = make_layer(self.preoutput_units, person2_units)
+        else:
+            self.hidden_to_person2 = make_layer(self.hidden_units, person2_units)
         
         # Initialize with small random weights
-        if param_init_type != 'default':
-            with torch.no_grad():
-                for p in self.parameters():
-                    if param_init_type == 'uniform':
-                        a = -param_init_scale + param_init_offset
-                        b = param_init_scale + param_init_offset
-                        nn.init.uniform_(p.data, a=a, b=b)
-                    elif param_init_type == 'normal':
-                        nn.init.normal_(p.data, mean=param_init_offset, std=param_init_scale)
-                    else:
-                        raise ValueError('Unrecognized param init type')
+        def init_uniform(param, offset, prange):
+            a = offset - prange/2
+            b = offset + prange/2
+            nn.init.uniform_(param.data, a=a, b=b)
+
+        def init_normal(param, offset, prange):
+            nn.init.normal_(param.data, mean=offset, std=prange/2)
+
+        def init_default(*_):
+            pass
+
+        init_fns = {'default': init_default, 'uniform': init_uniform, 'normal': init_normal}
+
+        with torch.no_grad():
+            for layer in self.children():
+                try:
+                    init_fns[self.weight_init_type](layer.weight, self.weight_init_offset, self.weight_init_range)
+                except KeyError:
+                    raise ValueError('Weight initialization type not recognized')
+
+                if layer.bias is not None:
+                    try:
+                        init_fns[self.bias_init_type](layer.bias, self.bias_init_offset, self.bias_init_range)
+                    except KeyError:
+                        raise ValueError('Bias initialization type notn recognized')
 
         # For simplicity, instead of using the "liberal" loss function described in the paper, make the targets 
         # 0.1 (for false) and 0.9 (for true) and use regular mean squared error.
-        self.person2_train_target = 0.8 * self.person2_mat + 0.1
-#         self.person2_train_target = self.person2_mat
-        self.criterion = loss_fn(reduction=loss_reduction)
+        if self.act_fn == torch.sigmoid:
+            self.person2_train_target = (1-self.target_offset) * self.person2_mat + self.target_offset/2
+        else:
+            self.person2_train_target = self.person2_mat
+
+        self.criterion = self.loss_fn(reduction=self.loss_reduction)
         
     def forward(self, person1, rel):
         person1_repr_act = self.act_fn(self.person1_to_repr(person1))
         rel_repr_act = self.act_fn(self.rel_to_repr(rel))
         repr_act = torch.cat((person1_repr_act, rel_repr_act), dim=1)
         hidden_act = self.act_fn(self.repr_to_hidden(repr_act))
-        preoutput_act = self.act_fn(self.hidden_to_preoutput(hidden_act))
-        return torch.sigmoid(self.preoutput_to_person2(preoutput_act))
-        # return torch.sigmoid(self.hidden_to_person2(hidden_act))
+
+        if self.use_preoutput:
+            preoutput_act = self.act_fn(self.hidden_to_preoutput(hidden_act))
+            return self.act_fn(self.preoutput_to_person2(preoutput_act))
+        else:
+            return self.act_fn(self.hidden_to_person2(hidden_act))
     
     def b_outputs_correct(self, outputs, batch_inds, threshold=0.2):
         """
@@ -202,9 +263,7 @@ class FamilyTreeNet(nn.Module):
         train_inds = np.setdiff1d(range(self.n_inputs), holdout_inds)
         return train_inds, holdout_inds
     
-    def do_training(self, num_epochs=(20, 1480), lr=(0.005, 0.01),
-                    momentum=(0.5, 0.9), weight_decay=0.002,
-                    n_holdout=4, report_freq=50, batch_size=0):
+    def do_training(self, **train_params):
         """
         Do the training!
         num_epochs is either a scalar or sequence of integers if there are multiple training stages.
@@ -213,23 +272,30 @@ class FamilyTreeNet(nn.Module):
         The weight decay here is not scaled by the learning rate (different from PyTorch's definition).
         If batch_size == 0, do full training set batches.
         """
-        
+
+        # Merge default params with overrides
+        train_params = {**train_defaults, **train_params}
+
+        num_epochs = train_params['num_epochs']
         if isinstance(num_epochs, tuple):
             n_stages = len(num_epochs)
         else:
             n_stages = 1
             num_epochs = (num_epochs,)
-        
+
+        lr = train_params['lr']
         if isinstance(lr, tuple):
             assert len(lr) == n_stages, 'Wrong number of lr values for number of stages'
         else:
             lr = tuple(lr for _ in range(n_stages))
-        
+
+        momentum = train_params['momentum']
         if isinstance(momentum, tuple):
             assert len(momentum) == n_stages, 'Wrong number of momentum values for number of stages'
         else:
             momentum = tuple(momentum for _ in range(n_stages))
-        
+
+        weight_decay = train_params['weight_decay']
         if isinstance(weight_decay, tuple):
             assert len(weight_decay) == n_stages, 'Wrong number of weight decay values for number of stages'
         else:
@@ -243,13 +309,13 @@ class FamilyTreeNet(nn.Module):
         optimizer = torch.optim.SGD(self.parameters(), lr=lr[0], momentum=momentum[0], weight_decay=wd_torch[0])
         
         # Choose the hold-out people/relationships from the English tree
-        train_inds, holdout_inds = self.prepare_holdout(n_holdout)
+        train_inds, holdout_inds = self.prepare_holdout(train_params['n_holdout'])
         n_inputs_train = len(train_inds)
         
         total_epochs = sum(num_epochs)
         change_epochs = list(np.cumsum(num_epochs))
         epoch_digits = len(str(total_epochs-1))
-        n_report = (total_epochs-1) // report_freq + 1
+        n_report = (total_epochs-1) // train_params['report_freq'] + 1
         reports = {rtype: np.zeros(n_report)
                    for rtype in ['loss', 'accuracy', 'frac_perfect',
                                  'test_accuracy', 'test_frac_perfect',
@@ -264,11 +330,11 @@ class FamilyTreeNet(nn.Module):
                 optimizer.param_groups[0]['weight_decay'] = wd_torch[k_change + 1]
             
             order = train_inds[torch.randperm(n_inputs_train, device='cpu')]
-            loss, acc_each, perfect_each, mean_out, std_out = self.train_epoch(order, optimizer, batch_size)
+            loss, acc_each, perfect_each, mean_out, std_out = self.train_epoch(order, optimizer, train_params['batch_size'])
             
             # report progress
-            if epoch % report_freq == 0:
-                k_report = epoch // report_freq
+            if epoch % train_params['report_freq'] == 0:
+                k_report = epoch // train_params['report_freq']
                 
                 with torch.no_grad():
                     mean_loss = loss.item() / n_inputs_train
@@ -302,34 +368,9 @@ class FamilyTreeNet(nn.Module):
 def train_n_fam_nets(n=36, run_type='', net_params=None, train_params=None):
     """Do a series of runs and save results"""
     
-    net_defaults = {
-        'single_tree': False,
-        'person1_repr_units': 6,
-        'rel_repr_units': 6,
-        'hidden_units': 12,
-        'preoutput_units': 6,
-        'use_biases': False,
-        'param_init_type': 'uniform',
-        'param_init_scale': 0.3,
-        'param_init_offset': 0.0,
-        'loss_fn': nn.MSELoss,
-        'loss_reduction': 'sum',
-        'act_fn': torch.sigmoid
-    }
-    
     if net_params is None:
         net_params = {}
     net_params = {**net_defaults, **net_params}
-    
-    train_defaults = {
-        'num_epochs': (20, 1480),
-        'lr': (0.005, 0.01),
-        'momentum': (0.5, 0.9),
-        'weight_decay': 0.002,
-        'n_holdout': 4,
-        'report_freq': 50,
-        'batch_size': 0
-    }
     
     if train_params is None:
         train_params = {}

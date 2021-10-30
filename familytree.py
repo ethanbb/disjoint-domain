@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Callable
 import numpy as np
 
 
@@ -97,7 +97,7 @@ class FamilyMember:
         return [nib for nib in self.get_niblings() if nib.sex == 'f']
     
     # Set of functions to compute relationships, in the order they are encoded in relationship input units
-    relationship_fns = [
+    relationship_fns: List[Callable[['FamilyMember'], List['FamilyMember']]] = [
         get_fathers, get_mothers,
         get_husbands, get_wives,
         get_sons, get_daughters,
@@ -125,8 +125,7 @@ class FamilyTree:
         
     def __repr__(self):
         return f'FamilyTree({self.members!r}, {self.couples!r})'
-    
-    
+
     def get_nonempty_related_members_mat(self, subject: FamilyMember, zeros_fn=np.zeros):
         """
         Get a matrix of which other family members are related to the subject by each relationship

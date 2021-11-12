@@ -3,7 +3,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D # noqa
-from mpl_toolkits import axes_grid1
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 from scipy.linalg import block_diag, svd, norm
@@ -15,258 +14,99 @@ from patsy import dmatrices
 import torch
 
 import disjoint_domain as dd
+import util
+import net_analysis
 
 report_titles = {
     'loss': 'Mean loss',
     'accuracy': 'Mean accuracy',
     'weighted_acc': 'Mean accuracy (weighted)',
+    'weighted_acc_loose': 'Mean weighted sign accuracy',
     'etg_item': 'Epochs to learn new items',
     'etg_context': 'Epochs to learn new contexts',
     'etg_domain': 'Epochs to learn new domain',
     'test_accuracy': 'Accuracy on novel item/context pairs',
-    'test_weighted_acc': 'Mean generalization accuracy (weighted)'
+    'test_weighted_acc': 'Mean generalization accuracy (weighted)',
+    'test_weighted_acc_loose': 'Generalization sign accuracy (weighted)'
 }
+
+
+# make some util functions available under this namespace since I have a ton of code using it
+auto_subplots = util.auto_subplots
+make_plot_grid = util.make_plot_grid
+outside_legend = util.outside_legend
+add_colorbar = util.add_colorbar
+imshow_centered_bipolar = util.imshow_centered_bipolar
 
 
 def inv_sigmoid(x):
     return -np.log(1/x - 1)
 
 
-def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
-                        include_individual=False):
-    """
-    Make distance matries (RSAs) of given representations of items or contexts,
-    averaged over training runs.
-
-    repr_snaps is a n_runs x n_snap_epochs x n_inputs x n_rep array, where
-    n_inputs is n_items or n_contexts and n_rep is the size of the representation.
-
-    Outputs a dict with keys:
-    'all': gives the mean distances between all representations over
-    all epochs. This is useful for making an MDS map of the training process.
-
-    'snaps': gives the mean distsances between items or contexts at each
-    recorded epoch. This is the n_inputs x n_inputs block diagonal of dists_all, stacked.
-    
-    If calc_all is False, only computes the distances within each epoch. (Distances across
-    epochs are generally only used to make an MDS plot.)
-    
-    If include_individual is True, includes snaps_each which is not meaned across runs.
-    """
-
-    def dist_fn(snaps):
-        if metric == 'spearman':
-            return 1 - stats.spearmanr(snaps, axis=1)[0]
-        else:
-            return distance.squareform(distance.pdist(snaps, metric=metric))
-    
-    if calc_all:
-        n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape
-        snaps_flat = np.reshape(repr_snaps, (n_runs, n_snap_epochs * n_inputs, n_rep))        
-        dists_all = np.stack([dist_fn(run_snaps) for run_snaps in snaps_flat])
-        mean_dists_all = np.nanmean(dists_all, axis=0)
-
-        mean_dists_snaps = np.empty((n_snap_epochs, n_inputs, n_inputs))
-        for k_epoch in range(n_snap_epochs):
-            this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
-            mean_dists_snaps[k_epoch] = mean_dists_all[this_slice, this_slice]
-            
-        dists_out = {'all': mean_dists_all, 'snaps': mean_dists_snaps}
-        
-        if include_individual:
-            dists_snaps = np.empty((n_runs, n_snap_epochs, n_inputs, n_inputs))
-            for k_epoch in range(n_snap_epochs):
-                this_slice = slice(k_epoch * n_inputs, (k_epoch+1) * n_inputs)
-                dists_snaps[:, k_epoch] = dists_all[:, this_slice, this_slice]
-
-            dists_out['snaps_each'] = dists_snaps
-            
-        return dists_out
-            
-    else:
-        # Directly calculate distances at each epoch
-        dists_snaps = np.stack([
-            np.stack([dist_fn(epoch_snaps) for epoch_snaps in run_snaps])
-            for run_snaps in repr_snaps
-        ])
-        mean_dists_snaps = np.nanmean(dists_snaps, axis=0)
-        
-        if include_individual:
-            return {'snaps': mean_dists_snaps, 'snaps_each': dists_snaps}
-        else:
-            return {'snaps': mean_dists_snaps}
-
-
-def get_mean_and_ci(series_set):
-    """
-    Given a set of N time series, compute and return the mean
-    along with 95% confidence interval using a t-distribution.
-    """
-    n = series_set.shape[0]
-    mean = np.mean(series_set, axis=0)
-    stderr = np.std(series_set, axis=0) / np.sqrt(n)
-    interval = np.stack([
-        stats.t.interval(0.95, df=n-1, loc=m, scale=std) if std > 0 else (m, m)
-        for (m, std) in zip(mean, stderr)
-    ], axis=1)
-    
-    return mean, interval
-
-
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
-                     dist_metric='euclidean', calc_all_repr_dists=True, include_individual_rdms=False):
-    """
-    Get dict of data (meaned over runs) from saved file
-    If subsample_snaps is > 1, use only every nth snapshot
-    Indexes into runs using the 'runs' argument
-    """    
-    with np.load(res_path, allow_pickle=True) as resfile:
-        snaps = resfile['snapshots'].item()
-        reports = resfile['reports'].item()
-        net_params = resfile['net_params'].item()
-        train_params = resfile['train_params'].item()
-        ys = resfile['ys']
-        
-    for possible_fn in ['cluster_info', 'last_domain_cluster_info']:
-        if possible_fn in net_params and callable(net_params[possible_fn]):
-            net_params[possible_fn] = net_params[possible_fn]()
-        
-    # take subset of snaps and reports if necessary
-    snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
-    reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
-
-    mean_repr_dists = {
-        snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric,
-                                       calc_all=calc_all_repr_dists, include_individual=include_individual_rdms)
-        for snap_type, repr_snaps in snaps.items()
-    }
+                     dist_metric='euclidean', calc_all_repr_dists=False, include_individual_rdms=False):
     
-    # also do full item and context repr dists
-    item_snaps = [snaps[stype] for stype in ['item', 'item_hidden'] if stype in snaps]
+    res = net_analysis.get_result_means(res_path, subsample_snaps, runs, dist_metric, calc_all_repr_dists,
+                                        include_individual_rdms, extra_keys=['ys'])
+    
+    # expand any cluster info that was passed as a nullary function
+    for possible_fn in ['cluster_info', 'last_domain_cluster_info']:
+        if possible_fn in res['net_params'] and callable(res['net_params'][possible_fn]):
+            res['net_params'][possible_fn] = res['net_params'][possible_fn]()
+            
+    # add full item and context repr dists
+    item_snaps = [res['snaps'][stype] for stype in ['item', 'item_hidden'] if stype in res['snaps']]
     if len(item_snaps) > 0:
         item_full_snaps = np.concatenate(item_snaps, axis=3)
-        mean_repr_dists['item_full'] = get_mean_repr_dists(item_full_snaps, metric=dist_metric,
-                                                           calc_all=calc_all_repr_dists,
-                                                           include_individual=include_individual_rdms)
+        res['repr_dists']['item_full'] = net_analysis.get_mean_repr_dists(item_full_snaps, metric=dist_metric,
+                                                                          calc_all=calc_all_repr_dists,
+                                                                          include_individual=include_individual_rdms)
     
-    ctx_snaps = [snaps[stype] for stype in ['context', 'context_hidden'] if stype in snaps]
+    ctx_snaps = [res['snaps'][stype] for stype in ['context', 'context_hidden'] if stype in res['snaps']]
     if len(ctx_snaps) > 0:
         ctx_full_snaps = np.concatenate(ctx_snaps, axis=3)
-        mean_repr_dists['context_full'] = get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
-                                                              calc_all=calc_all_repr_dists,
-                                                              include_individual=include_individual_rdms)
-
-    report_stats = {
-        report_type: get_mean_and_ci(report)
-        for report_type, report in reports.items()
-    }
+        res['repr_dists']['context_full'] = net_analysis.get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
+                                                                             calc_all=calc_all_repr_dists,
+                                                                             include_individual=include_individual_rdms)
+    return res
     
-    report_means = {report_type: rstats[0] for report_type, rstats in report_stats.items()}
-    report_cis = {report_type: rstats[1] for report_type, rstats in report_stats.items()}
-
-    snap_epochs = dd.calc_snap_epochs(
-        train_params['snap_freq'], train_params['snap_freq_scale'],
-        train_params['num_epochs'])[::subsample_snaps]
-
-    report_epochs = np.arange(0, train_params['num_epochs'], train_params['report_freq'])
-    etg_epochs = report_epochs[::train_params['reports_per_test']]
     
-    # dict of individual snapshots that are normalized as empirical (partial) I/O matrices
+def calc_iomat_snaps(res):
+    """Add dict of individual snapshots that are normalized as empirical (partial) I/O matrices to res"""
     iomat_snaps = dict()
-    if 'attr' in snaps:
-        iomat_snaps['attr'] = snaps['attr']
-    if 'attr_preact' in snaps:
-        iomat_snaps['attr_preact'] = snaps['attr_preact']
+    if 'attr' in res['snaps']:
+        iomat_snaps['attr'] = res['snaps']['attr']
+    if 'attr_preact' in res['snaps']:
+        iomat_snaps['attr_preact'] = res['snaps']['attr_preact']
     
-    if 'use_item_repr' not in net_params or net_params['use_item_repr']:
-        iomat_snaps['repr'] = snaps['item'] / snaps['item'].shape[2]
-        if 'item_preact' in snaps:
-            iomat_snaps['repr_preact'] = snaps['item_preact'] / snaps['item_preact'].shape[2]
+    if 'use_item_repr' not in res['net_params'] or res['net_params']['use_item_repr']:
+        iomat_snaps['repr'] = res['snaps']['item'] / res['snaps']['item'].shape[2]
+        if 'item_preact' in res['snaps']:
+            iomat_snaps['repr_preact'] = res['snaps']['item_preact'] / res['snaps']['item_preact'].shape[2]
         
-    if 'item_hidden_mean' in snaps:
-        iomat_snaps['hidden'] = snaps['item_hidden_mean'] / snaps['item_hidden_mean'].shape[2]
-        if 'item_hidden_mean_preact' in snaps:
-            iomat_snaps['hidden_preact'] = snaps['item_hidden_mean_preact'] / snaps['item_hidden_mean_preact'].shape[2]
+    if 'item_hidden_mean' in res['snaps']:
+        iomat_snaps['hidden'] = res['snaps']['item_hidden_mean'] / res['snaps']['item_hidden_mean'].shape[2]
+        if 'item_hidden_mean_preact' in res['snaps']:
+            iomat_snaps['hidden_preact'] = res['snaps']['item_hidden_mean_preact'] / res['snaps']['item_hidden_mean_preact'].shape[2]
 
-    elif 'use_ctx' in net_params and not net_params['use_ctx']:
-        iomat_snaps['hidden'] = snaps['item_hidden'] / snaps['item_hidden'].shape[2]
-        
-    return {
-        'path': res_path,
-        'repr_dists': mean_repr_dists,
-        'reports': report_means,
-        'report_cis': report_cis,
-        'net_params': net_params,
-        'train_params': train_params,
-        'snap_epochs': snap_epochs,
-        'report_epochs': report_epochs,
-        'etg_epochs': etg_epochs,
-        'ys': ys,
-        'iomat_snaps': iomat_snaps
-    }
-
-
-def auto_subplots(n_rows, n_cols, ax_dims=(4, 4), prop_cycle=None):
-    """Make subplots, automatically adjusting the figsize, and without squeezing"""
-    figsize = (ax_dims[0] * n_cols, ax_dims[1] * n_rows)
-    fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
-    for ax in axs.ravel():
-        ax.set_prop_cycle(prop_cycle)
-    return fig, axs
-
-
-def make_plot_grid(n, n_cols=3, ax_dims=(4, 4), ravel=True, prop_cycle=None):
-    """
-    Create a figure with n axes arranged in a grid, and return the fig and flat array of axes
-    ax_dims is the width, height of each axes in inches (or whatever units matplotlib uses)
-    """
-    n_rows = (n-1) // n_cols + 1
-    fig, axs = auto_subplots(n_rows, n_cols, ax_dims=ax_dims, prop_cycle=prop_cycle)
-    return fig, axs.ravel() if ravel else axs
-
-
-def outside_legend(ax, **legend_params):
-    ax.legend(loc='upper left', bbox_to_anchor=(1, 1), **legend_params)
+    elif 'use_ctx' in res['net_params'] and not res['net_params']['use_ctx']:
+        iomat_snaps['hidden'] = res['snaps']['item_hidden'] / res['snaps']['item_hidden'].shape[2]\
     
+    res['iomat_snaps'] = iomat_snaps
     
-def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
-    """Add a vertical color bar to an image plot. (source: https://stackoverflow.com/a/33505522)"""
-    divider = axes_grid1.make_axes_locatable(im.axes)
-    width = axes_grid1.axes_size.AxesY(im.axes, aspect=1./aspect)
-    pad = axes_grid1.axes_size.Fraction(pad_fraction, width)
-    current_ax = plt.gca()
-    cax = divider.append_axes("right", size=width, pad=pad)
-    plt.sca(current_ax)
-    return im.axes.figure.colorbar(im, cax=cax, **kwargs)
+
+def plot_report(ax, res, report_type, **kwargs):
+    if 'title' not in kwargs:
+        kwargs['title'] = report_titles[report_type]
+    net_analysis.plot_report(ax, res, report_type, **kwargs)
 
 
-def plot_report(ax, res, report_type, with_ci=True, label=None, **plot_params):
-    """Make a standard plot of mean loss, accuracy, etc. over training"""
-    xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
-    ax.plot(xaxis, res['reports'][report_type], label=label, **plot_params)
-    if with_ci:
-        ax.fill_between(xaxis, *res['report_cis'][report_type], alpha=0.3)
-        
-    ax.set_xlabel('Epoch')
-    ax.set_title(report_titles[report_type])
+def plot_individual_reports(ax, res, report_type, **kwargs):
+    if 'title' not in kwargs:
+        kwargs['title'] = report_titles[report_type]
+    net_analysis.plot_individual_reports(ax, res, report_type, **kwargs)
 
 
-def plot_individual_reports(ax, res, all_reports, report_type, **plot_params):
-    """
-    Take a closer look by looking at a statistic for each run in a set.
-    all_reports should be the full reports dict of runs x epochs matrices,
-    loaded from the results file.
-    """
-    xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
-
-    for (i, report) in enumerate(all_reports[report_type]):
-        ax.plot(xaxis, report, label=f'Run {i+1}', **plot_params)
-
-    ax.set_xlabel('Epoch')
-    ax.set_title(report_titles[report_type] + ' (each run)')
-    outside_legend(ax, ncol=2, fontsize='x-small')
-
-    
 def _get_names_for_snapshots(snap_type, **net_params):
     """Helper to retrieve input names depending on the type of snapshot"""
     if 'item' in snap_type or 'attr' in snap_type:
@@ -277,92 +117,25 @@ def _get_names_for_snapshots(snap_type, **net_params):
         raise ValueError('Unrecognized snapshot type')
     
     return names
-
-
-def imshow_centered_bipolar(ax, mat, **imshow_args):
-    max_absval = np.max(np.abs(mat))
-    return ax.imshow(mat, cmap='seismic', vmin=-max_absval,
-                     vmax=max_absval, interpolation='nearest', **imshow_args)
-    
-    
-def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
-                            tick_fontsize='medium', **imshow_args):
-    """
-    Helper to plot matrix with each row labeled with 'labels' and also each column if desired.
-    """        
-    n = len(labels)
-    assert n == mat.shape[0], 'Wrong number of labels'
-    if label_cols:
-        assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
-    
-    image = imshow_centered_bipolar(ax, mat, **imshow_args)
-
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(labels)
-    
-    if label_cols:
-        ax.tick_params(axis='x', labelrotation=45)
-        ax.set_xticks(range(n))
-        ax.set_xticklabels(labels)
-    
-    if colorbar:
-        add_colorbar(image)
-        
-    for ticklabel in ax.get_xticklabels() + ax.get_yticklabels():
-        ticklabel.set_fontsize(tick_fontsize)
-    
-    return image
     
 
 def plot_matrix_with_input_labels(ax, mat, input_type, res=None, **plot_matrix_args):
-    """
-    Helper to plot matrix with labels corresponding to items or contexts
-    """
+    """Helper to plot matrix with labels corresponding to items or contexts"""
     if res is None:
         net_params = {}
     else:
         net_params = res['net_params']
     labels = _get_names_for_snapshots(input_type, **net_params)
-    return plot_matrix_with_labels(ax, mat, labels, **plot_matrix_args)
+    return util.plot_matrix_with_labels(ax, mat, labels, **plot_matrix_args)
 
 
-def plot_rsa(ax, res, snap_type, snap_ind, title_addon=None, item_order='domain-outer',
-             colorbar=True, rsa_mat=None, tick_fontsize='x-small'):
+def plot_rsa(ax, res, snap_type, snap_ind, **kwargs):
     """
     Plot an RSA matrix for the representation of items or contexts at a particular epoch
-    item_order: controls the order of items in the matrix - either a string or an
-    array to use a custom permutation.
-        'domain-outer' (default): items are grouped together by domain
-        'domain-inner': first item of each domain, then second item, etc.
     If 'rsa_mat' is provided, overrides the matrix to plot.
     """
     input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
-    n_inputs = len(input_names)
-
-    if rsa_mat is None:
-        rsa_mat = res['repr_dists'][snap_type]['snaps'][snap_ind]
-
-    n_domains = res['net_params']['n_domains']
-    if item_order == 'domain-outer':
-        perm = None
-    elif item_order == 'domain-inner':
-        inds = np.reshape(np.arange(n_inputs, dtype=int), (n_domains, -1))    
-        perm = inds.T.ravel()
-    else:
-        perm = item_order
-
-    if perm is not None:
-        input_names = [input_names[i] for i in perm]
-        rsa_mat = rsa_mat[np.ix_(perm, perm)]
-
-    image = plot_matrix_with_labels(ax, rsa_mat, input_names, colorbar=colorbar, tick_fontsize=tick_fontsize)
-
-    title = f'Epoch {res["snap_epochs"][snap_ind]}'
-    if title_addon is not None:
-        title += f'\n({title_addon})'
-    ax.set_title(title)
-
-    return image
+    return net_analysis.plot_rsa(ax, res, snap_type, snap_ind, input_names, **kwargs)
 
 
 def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr', center=False):
@@ -372,6 +145,9 @@ def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer
     n_modes allows returning only the first n modes (if not None)
     Output is an n_items x n_modes matrix.
     """
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+
     mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
     if center:
         mat = mat - np.mean(mat, axis=0)
@@ -438,6 +214,9 @@ def get_item_nmf_loadings_and_scores(res, snap_ind, run_ind, n_modes=None, layer
     """
     Do an NMF decomposition of the empirical I/O matrix
     """
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+    
     model = NMF(n_components=n_modes, solver='mu', max_iter=500)
     mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
     # a little hacky but I think it's reasonable to get all elements positive...
@@ -491,6 +270,9 @@ def get_domain_mixing_score(res, snap_ind, run_ind, layer='attr'):
 def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
                               with_ci=True, label=None, **plot_params):
     """Make a plot of mean domain mixing scores over epochs"""
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+    
     iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
@@ -503,7 +285,7 @@ def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
         for run_ind in range(iomats.shape[0])
     ])
 
-    score_mean, score_ci = get_mean_and_ci(mixing_scores)
+    score_mean, score_ci = util.get_mean_and_ci(mixing_scores)
     xaxis = [res['snap_epochs'][e] for e in epoch_range]
     ax.plot(xaxis, score_mean, label=label, **plot_params)
     if with_ci:
@@ -523,6 +305,9 @@ def get_io_corr_rank(res, snap_ind, run_ind, layer='attr', center=True):
 
 def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr', center=True,
                        with_ci=True, label=None, **plot_params):
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+    
     iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
@@ -535,7 +320,7 @@ def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr', center=True,
         for run_ind in range(iomats.shape[0])
     ])
 
-    rank_mean, rank_ci = get_mean_and_ci(corr_ranks)
+    rank_mean, rank_ci = util.get_mean_and_ci(corr_ranks)
     xaxis = [res['snap_epochs'][e] for e in epoch_range]
     ax.plot(xaxis, rank_mean, label=label, **plot_params)
     if with_ci:
@@ -554,6 +339,9 @@ def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer, center=True):
     to the value it takes for the ground-truth I/O matrix) or for intermediate steps.
     This is selected with the layer argument, which should be 'repr', 'hidden', or 'attr'.
     """
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+    
     try:
         mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
         if center:
@@ -593,6 +381,9 @@ def get_rank_domain_mixing_score(res, snap_ind, run_ind, layer):
 
 def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
                                    with_ci=True, label=None, **plot_params):
+    if 'iomat_snaps' not in res:
+        calc_iomat_snaps(res)
+    
     iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
@@ -605,7 +396,7 @@ def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
         for run_ind in range(iomats.shape[0])
     ])
 
-    rank_mean, rank_ci = get_mean_and_ci(rank_mixing_scores)
+    rank_mean, rank_ci = util.get_mean_and_ci(rank_mixing_scores)
     xaxis = [res['snap_epochs'][e] for e in epoch_range]
     ax.plot(xaxis, rank_mean, label=label, **plot_params)
     if with_ci:
@@ -913,7 +704,7 @@ def plot_rdm_projections(res, snap_type, axs, label=None, **plot_params):
     
     for ax, mtype in zip(axs, model_types):
         try:
-            mean, (lower, upper) = get_mean_and_ci(projections[mtype])
+            mean, (lower, upper) = util.get_mean_and_ci(projections[mtype])
         except KeyError:
             raise ValueError(f'Model type {mtype} not defined for {snap_type} snapshots.')
         
@@ -1051,7 +842,7 @@ def plot_attr_freq_dist_correlation(ax, res, snap_type='item_full', train_items=
         corr_vec[:] = [np.corrcoef(attr_freq_dist_cd, idist)[0, 1] for idist in item_repr_dists_cd]
     
     # now plot, with confidence interval
-    mean, ci = get_mean_and_ci(corrs)
+    mean, ci = util.get_mean_and_ci(corrs)
     ax.plot(res['snap_epochs'], mean, label=label, **plot_params)
     ax.fill_between(res['snap_epochs'], *ci, alpha=0.3)
     ax.set_xlabel('Epoch')

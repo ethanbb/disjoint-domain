@@ -18,15 +18,16 @@ class Couple:
         return f'Couple({self.wife!r}, {self.husband!r})'
 
 
-class FamilyMember:
-    def __init__(self, name: str, sex: Literal['m', 'f'], parents: Couple = None):
-        self.name = name
-        self.sex = sex
-        self.parents = parents
-        self.couple = None
-        if parents is not None:
-            parents.children.append(self)
+class RelationshipFn:
+    def __init__(self, rel_name: str, impl: Callable[[], List['FamilyMember']]):
+        self.name = rel_name  # name of the relationship
+        self.impl = impl
+    
+    def __call__(self):
+        return self.impl()
 
+
+class FamilyMember:
     def __str__(self):
         return self.name
 
@@ -96,15 +97,29 @@ class FamilyMember:
     def get_nieces(self):
         return [nib for nib in self.get_niblings() if nib.sex == 'f']
     
-    # Set of functions to compute relationships, in the order they are encoded in relationship input units
-    relationship_fns: List[Callable[['FamilyMember'], List['FamilyMember']]] = [
-        get_fathers, get_mothers,
-        get_husbands, get_wives,
-        get_sons, get_daughters,
-        get_brothers, get_sisters,
-        get_uncles, get_aunts,
-        get_nephews, get_nieces
-    ]
+    def __init__(self, name: str, sex: Literal['m', 'f'], parents: Couple = None):
+        self.name = name
+        self.sex = sex
+        self.parents = parents
+        self.couple = None
+        if parents is not None:
+            parents.children.append(self)
+    
+        # Set of functions to compute relationships, in the order they are encoded in relationship input units
+        self.relationship_fns = [
+            RelationshipFn('father', self.get_fathers),
+            RelationshipFn('mother', self.get_mothers),
+            RelationshipFn('husband', self.get_husbands),
+            RelationshipFn('wife', self.get_wives),
+            RelationshipFn('sons', self.get_sons),
+            RelationshipFn('daughters', self.get_daughters),
+            RelationshipFn('brothers', self.get_brothers),
+            RelationshipFn('sisters', self.get_sisters),
+            RelationshipFn('uncles', self.get_uncles),
+            RelationshipFn('aunts', self.get_aunts),
+            RelationshipFn('nephews', self.get_nephews),
+            RelationshipFn('nieces', self.get_nieces)
+        ]
 
 
 class FamilyTree:
@@ -125,17 +140,23 @@ class FamilyTree:
         
     def __repr__(self):
         return f'FamilyTree({self.members!r}, {self.couples!r})'
+    
+    def __add__(self, other):
+        if not isinstance(other, FamilyTree):
+            return NotImplemented
+        newtree = FamilyTree(self.members + other.members, self.couples + other.couples)
+        return newtree
 
     def get_nonempty_related_members_mat(self, subject: FamilyMember, zeros_fn=np.zeros):
         """
         Get a matrix of which other family members are related to the subject by each relationship
         for which there is at least one related member, along with the corresponding matrix of relationship indices
         """
-        related_members = [fn(subject) for fn in FamilyMember.relationship_fns]
+        related_members = [fn() for fn in subject.relationship_fns]
         rel_member_pairs = [(rel_ind, membs) for rel_ind, membs in enumerate(related_members) if len(membs) > 0]
         n_rels = len(rel_member_pairs)
         
-        rel_mat = zeros_fn((n_rels, len(FamilyMember.relationship_fns)))
+        rel_mat = zeros_fn((n_rels, len(subject.relationship_fns)))
         member_mat = zeros_fn((n_rels, self.size))
         for i, (rel_ind, membs) in enumerate(rel_member_pairs):
             rel_mat[i, rel_ind] = 1

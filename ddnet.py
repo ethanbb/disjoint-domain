@@ -1,3 +1,4 @@
+from datetime import datetime as dt
 import torch
 import torch.nn as nn
 from torchnlp.nn.weight_drop import WeightDropLinear
@@ -5,6 +6,38 @@ import numpy as np
 from copy import deepcopy
 
 import disjoint_domain as dd
+import util
+
+net_defaults = {
+    'n_domains': 4, 'ctx_per_domain': 4,
+    'attrs_per_context': 60, 'attrs_set_per_item': 25, 'padding_attrs': 0,
+    'use_item_repr': True, 'item_repr_units': 16, 'merged_repr': False,
+    'use_ctx': True, 'share_ctx': False, 'use_ctx_repr': True, 'ctx_repr_units': 16,
+    'hidden_units': 32,
+    'share_attr_units_in_domain': False, 'repeat_attrs_over_domains': False, 'attr_weightdrop': 0.,
+    'cluster_info': '4-2-2', 'last_domain_cluster_info': None,
+    'param_init_type': 'normal', 'param_init_scale': 0.01,
+    'fix_biases': False, 'fixed_bias': -2,
+    'act_fn': torch.sigmoid, 'output_act_fn': None, 'loss_fn': nn.BCELoss,
+    'rng_seed': None, 'torchfp': None, 'device': None
+}
+
+train_defaults = {
+    'lr': 0.01,
+    'num_epochs': 3001,
+    'batch_size': 16,
+    'report_freq': 50,
+    'snap_freq': 50,
+    'snap_freq_scale': 'lin',
+    'scheduler': None,
+    'holdout_testing': 'none',
+    'reports_per_test': 4,
+    'test_thresh': 0.97,
+    'test_max_epochs': 10000,
+    'do_combo_testing': False,
+    'n_combo_per_domain': 1,
+    'param_snapshots': False
+}
 
 
 class DisjointDomainNet(nn.Module):
@@ -20,7 +53,8 @@ class DisjointDomainNet(nn.Module):
     - merged_repr: Use a single representation layer for items and contexts, of size item_repr_units + ctx_repr_units
     - hidden_units: Size of (final) hidden layer
     - use_ctx: False to not have any context inputs at all (probably best with ctx_per_domain=1)
-    - share_ctx: True to use one set of context inputs for all domains instead of separate ones (WIP)
+    - share_ctx: True to use one set of context inputs for all domains instead of separate ones
+    - share_attr_units_in_domain: True to use the same attr units for each context within each domain.
     - cluster_info: String or dict specifying item similarity structure, etc. - see dd.make_attr_vecs()
     - last_domain_cluster_info: If not None, possibly different cluster_info for the last domain
     - param_init_type: How to initialize weights and biases - 'default' (PyTorch default), 'normal' or 'uniform'
@@ -46,7 +80,10 @@ class DisjointDomainNet(nn.Module):
             n_domains=self.n_domains, cluster_info=self.cluster_info, 
             last_domain_cluster_info=self.last_domain_cluster_info,
             repeat_attrs_over_domains=self.repeat_attrs_over_domains,
-            share_ctx=self.share_ctx)
+            share_ctx=self.share_ctx,
+            share_attr_units_in_domain=self.share_attr_units_in_domain,
+            padding_attrs=self.padding_attrs
+        )
 
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
@@ -54,106 +91,109 @@ class DisjointDomainNet(nn.Module):
 
         return x_item, x_context, y
 
-    def __init__(self, ctx_per_domain, attrs_per_context, n_domains, attrs_set_per_item=25,
-                 use_item_repr=True, item_repr_units=16, use_ctx_repr=True, ctx_repr_units=16,
-                 merged_repr=False, hidden_units=32, use_ctx=True, share_ctx=False,
-                 cluster_info='4-2-2', last_domain_cluster_info=None,
-                 param_init_type='normal', param_init_scale=0.01, fix_biases=False,
-                 fixed_bias=-2, repeat_attrs_over_domains=False, attr_weightdrop=0., 
-                 activation_fn=torch.sigmoid, output_activation=None, loss_fn=nn.BCELoss,                 
-                 rng_seed=None, torchfp=None, device=None):
+    def __init__(self, **net_params):
         super(DisjointDomainNet, self).__init__()
-        
-        assert (not merged_repr) or (use_item_repr and use_ctx_repr), "Can't both skip and merge repr layers"
 
-        self.share_ctx = share_ctx
+        # Merge default params with overrides and make them properties
+        net_params = {**net_defaults, **net_params}
+        for key, val in net_params.items():
+            setattr(self, key, val)
+
+        self.use_ctx_repr = self.use_ctx and self.use_ctx_repr
+        if self.merged_repr:
+            assert self.use_item_repr and self.use_ctx_repr, "Can't both skip and merge repr layers"
+
         if self.share_ctx:
-            self.n_contexts = ctx_per_domain
+            self.n_contexts = self.ctx_per_domain
         else:
-            self.n_contexts = ctx_per_domain * n_domains
+            self.n_contexts = self.ctx_per_domain * self.n_domains
 
-        self.ctx_per_domain = ctx_per_domain
-        self.attrs_per_context = attrs_per_context
-        self.n_domains = n_domains
-        self.attrs_set_per_item = attrs_set_per_item
-        self.n_items = dd.ITEMS_PER_DOMAIN * n_domains
-        self.n_attributes = attrs_per_context * ctx_per_domain * n_domains
-        self.merged_repr = merged_repr
-        self.use_item_repr = use_item_repr
-        self.use_ctx_repr = use_ctx and use_ctx_repr
-        self.use_ctx = use_ctx
-        if callable(cluster_info):
-            cluster_info = cluster_info()
-        self.cluster_info = cluster_info
-        if callable(last_domain_cluster_info):
-            last_domain_cluster_info = last_domain_cluster_info()
-        self.last_domain_cluster_info = last_domain_cluster_info
-        self.repeat_attrs_over_domains = repeat_attrs_over_domains
-        self.act_fn = activation_fn
-        self.output_act_fn = activation_fn if output_activation is None else output_activation
-        self.criterion = loss_fn(reduction='sum')
+        self.n_items = dd.ITEMS_PER_DOMAIN * self.n_domains
+
+        self.n_attributes = self.attrs_per_context * self.n_domains
+        if not self.share_attr_units_in_domain:
+            self.n_attributes *= self.ctx_per_domain
+
+        if callable(self.cluster_info):
+            self.cluster_info = self.cluster_info()
+        if callable(self.last_domain_cluster_info):
+            self.last_domain_cluster_info = self.last_domain_cluster_info()
+
+        if self.output_act_fn is None:
+            self.output_act_fn = self.act_fn
+        self.criterion = self.loss_fn(reduction='sum')
         
-        self.dummy_item = torch.zeros((1, self.n_items))
-        self.dummy_ctx = torch.zeros((1, self.n_contexts))
+        self.dummy_item = torch.zeros((1, self.n_items), device=self.device)
+        self.dummy_ctx = torch.zeros((1, self.n_contexts), device=self.device)
 
-        if rng_seed is None:
-            torch.seed()
+        if self.rng_seed is None:
+            self.rng_seed = torch.seed()
         else:
-            torch.manual_seed(rng_seed)
+            torch.manual_seed(self.rng_seed)
 
-        self.device, self.torchfp = dd.init_torch(device, torchfp)
+        self.device, self.torchfp, _ = util.init_torch(self.device, self.torchfp)
+        if self.device.type == 'cuda':
+            print('Using CUDA')
+        else:
+            print('Using CPU')
 
-        self.item_repr_size = item_repr_units if self.use_item_repr else self.n_items
-        self.ctx_repr_size = ctx_repr_units if self.use_ctx_repr else self.n_contexts
-        self.hidden_size = hidden_units
+        if not self.use_item_repr:
+            self.item_repr_units = self.n_items
+
+        if not self.use_ctx_repr:
+            self.ctx_repr_units = self.n_contexts
         
-        self.repr_size = self.item_repr_size + self.ctx_repr_size
+        self.repr_units = self.item_repr_units + self.ctx_repr_units
         if self.merged_repr:
             # inputs should map to full repr layer
-            self.item_repr_size = self.repr_size
-            self.ctx_repr_size = self.repr_size
+            self.item_repr_units = self.repr_units
+            self.ctx_repr_units = self.repr_units
         
         def make_bias(n_units):
             """Make bias for a layer, either a constant or trainable parameter"""
-            if fix_biases:
-                return torch.full((n_units,), fixed_bias, device=device)
+            if self.fix_biases:
+                return torch.full((n_units,), self.fixed_bias, device=self.device)
             else:
-                return nn.Parameter(torch.empty((n_units,), device=device))
-        
+                return nn.Parameter(torch.empty((n_units,), device=self.device))
+
+        def make_layer(in_size, out_size):
+            weights = nn.Linear(in_size, out_size, bias=False).to(self.device)
+            biases = make_bias(out_size)
+            return weights, biases
+
         # define layers
-        self.item_to_rep = (nn.Linear(self.n_items, self.item_repr_size, bias=False).to(device)
-                            if self.use_item_repr else nn.Identity())
-        self.item_rep_bias = (make_bias(self.item_repr_size)
-                              if self.use_item_repr else torch.zeros((self.n_items,),
-                                                                    device=device))
+        if self.use_item_repr:
+            self.item_to_rep, self.item_rep_bias = make_layer(self.n_items, self.item_repr_units)
+        else:
+            self.item_to_rep = nn.Identity()
+            self.item_rep_bias = torch.zeros((self.n_items,), device=self.device)
         
         if self.use_ctx:
-            self.ctx_to_rep = (nn.Linear(self.n_contexts, self.ctx_repr_size, bias=False).to(device)
-                               if self.use_ctx_repr else nn.Identity())
-            self.ctx_rep_bias = (make_bias(self.ctx_repr_size)
-                                 if self.use_ctx_repr else torch.zeros((self.n_contexts,),
-                                                                       device=device))
+            if self.use_ctx_repr:
+                self.ctx_to_rep, self.ctx_rep_bias = make_layer(self.n_contexts, self.ctx_repr_units)
+            else:
+                self.ctx_to_rep = nn.Identity()
+                self.ctx_rep_bias = torch.zeros((self.n_contexts,), device=self.device)
         else:
             # replace with dummies
             def make_dummy_ctx_rep(context):
-                return torch.zeros((context.shape[0], self.ctx_repr_size), device=device)
+                return torch.zeros((context.shape[0], self.ctx_repr_units), device=self.device)
             self.ctx_to_rep = make_dummy_ctx_rep
-            self.ctx_rep_bias = torch.zeros((self.ctx_repr_size,), device=device)
+            self.ctx_rep_bias = torch.zeros((self.ctx_repr_units,), device=self.device)
         
-        self.rep_to_hidden = nn.Linear(self.repr_size, self.hidden_size, bias=False).to(device)
-        self.hidden_bias = make_bias(self.hidden_size)
-        self.hidden_to_attr = WeightDropLinear(self.hidden_size, self.n_attributes, bias=False,
-                                               weight_dropout=attr_weightdrop).to(device)
+        self.rep_to_hidden, self.hidden_bias = make_layer(self.repr_units, self.hidden_units)
+        self.hidden_to_attr = WeightDropLinear(self.hidden_units, self.n_attributes, bias=False,
+                                               weight_dropout=self.attr_weightdrop).to(self.device)
         self.attr_bias = make_bias(self.n_attributes)
 
         # make weights start small
-        if param_init_type != 'default':
+        if self.param_init_type != 'default':
             with torch.no_grad():
                 for p in self.parameters():
-                    if param_init_type == 'normal':
-                        nn.init.normal_(p.data, std=param_init_scale)
-                    elif param_init_type == 'uniform':
-                        nn.init.uniform_(p.data, a=-param_init_scale, b=param_init_scale)
+                    if self.param_init_type == 'normal':
+                        nn.init.normal_(p.data, std=self.param_init_scale)
+                    elif self.param_init_type == 'uniform':
+                        nn.init.uniform_(p.data, a=-self.param_init_scale, b=self.param_init_scale)
                     else:
                         raise ValueError('Unrecognized param init type')
 
@@ -163,10 +203,10 @@ class DisjointDomainNet(nn.Module):
 
         # individual item/context tensors for evaluating the network
         self.items, self.item_names = dd.get_items(
-            n_domains=n_domains, cluster_info=self.cluster_info,
+            n_domains=self.n_domains, cluster_info=self.cluster_info,
             last_domain_cluster_info=self.last_domain_cluster_info)
         self.contexts, self.context_names = dd.get_contexts(
-            n_domains=n_domains, ctx_per_domain=ctx_per_domain, share_ctx=self.share_ctx)
+            n_domains=self.n_domains, ctx_per_domain=self.ctx_per_domain, share_ctx=self.share_ctx)
 
     def calc_item_repr_preact(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
@@ -217,6 +257,10 @@ class DisjointDomainNet(nn.Module):
         weights = torch.where(self.y[batch_inds].to(bool), set_weight, unset_weight)
         b_correct = self.b_outputs_correct(outputs, batch_inds)
         return torch.sum(weights * b_correct, dim=1)
+    
+    def weighted_acc_loose(self, outputs, batch_inds):
+        outputs_binary = (outputs > 0.5).to(self.torchfp)
+        return self.weighted_acc(outputs_binary, batch_inds)
 
     def train_epoch(self, order, batch_size, optimizer):
         """
@@ -227,6 +271,7 @@ class DisjointDomainNet(nn.Module):
         total_loss = torch.tensor(0.0)
         acc_each = torch.full((self.n_inputs,), np.nan)
         wacc_each = torch.full((self.n_inputs,), np.nan)
+        wacc_loose_each = torch.full((self.n_inputs,), np.nan)
         if type(order) != torch.Tensor:
             order = torch.tensor(order, device='cpu', dtype=torch.long)
         
@@ -241,8 +286,9 @@ class DisjointDomainNet(nn.Module):
                 total_loss += loss
                 acc_each[batch_inds] = torch.mean(self.b_outputs_correct(outputs, batch_inds), dim=1)
                 wacc_each[batch_inds] = self.weighted_acc(outputs, batch_inds)
+                wacc_loose_each[batch_inds] = self.weighted_acc_loose(outputs, batch_inds)
 
-        return total_loss, acc_each, wacc_each
+        return total_loss, acc_each, wacc_each, wacc_loose_each
 
     def prepare_holdout(self, holdout_item=True, holdout_context=True):
         """
@@ -253,29 +299,33 @@ class DisjointDomainNet(nn.Module):
         Returns vectors of indices into items, contexts, and x/y that will still be used. 
         """
         ho_item_domain, ho_ctx_domain = dd.choose_k_inds(self.n_domains, 2)
-        ho_item_ind = ho_item_domain * dd.ITEMS_PER_DOMAIN + dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, 1)
         if holdout_item:
+            ho_item_ind = ho_item_domain * dd.ITEMS_PER_DOMAIN + dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, 1)
+            ho_item = self.items[ho_item_ind]
+            b_x_item_ho = self.x_item.eq(ho_item).all(axis=1).cpu()
+            test_x_item_inds = torch.flatten(torch.nonzero(b_x_item_ho))
             print(f'Holding out item: {self.item_names[ho_item_ind]}')
-            
-        ho_ctx_ind = dd.choose_k_inds(self.ctx_per_domain, 1)
-        if not self.share_ctx:
-            ho_ctx_ind += ho_ctx_domain * self.ctx_per_domain
+        else:
+            ho_item_ind = []
+            test_x_item_inds = []
+
         if holdout_context:
+            ho_ctx_ind = dd.choose_k_inds(self.ctx_per_domain, 1)
+            if not self.share_ctx:
+                ho_ctx_ind += ho_ctx_domain * self.ctx_per_domain
+            ho_context = self.contexts[ho_ctx_ind]
+            b_x_ctx_ho = self.x_context.eq(ho_context).all(axis=1).cpu()
+            test_x_ctx_inds = torch.flatten(torch.nonzero(b_x_ctx_ho))
             print(f'Holding out context: {self.context_names[ho_ctx_ind]}')
+        else:
+            ho_ctx_ind = []
+            test_x_ctx_inds = []
 
-        train_item_inds = np.setdiff1d(range(self.n_items), ho_item_ind) if holdout_item else np.arange(self.n_items)
-        train_ctx_inds = np.setdiff1d(range(self.n_contexts), ho_ctx_ind) if holdout_context else np.arange(self.n_contexts)
+        train_item_inds = np.setdiff1d(range(self.n_items), ho_item_ind)
+        train_ctx_inds = np.setdiff1d(range(self.n_contexts), ho_ctx_ind)
 
-        # figure out which inputs are held out (item/context combinations)
-        ho_item = self.items[ho_item_ind]
-        ho_context = self.contexts[ho_ctx_ind]
-        b_x_item_ho = self.x_item.eq(ho_item).all(axis=1).cpu()
-        b_x_ctx_ho = self.x_context.eq(ho_context).all(axis=1).cpu()
-        test_x_item_inds = torch.flatten(torch.nonzero(b_x_item_ho)) if holdout_item else []
-        test_x_ctx_inds = torch.flatten(torch.nonzero(b_x_ctx_ho)) if holdout_context else []
-        
         # prepare array of which items to use during training
-        train_x_inds = np.setdiff1d(np.arange(self.n_inputs), np.concatenate([test_x_item_inds, test_x_ctx_inds]))
+        train_x_inds = np.setdiff1d(range(self.n_inputs), np.concatenate([test_x_item_inds, test_x_ctx_inds]))
 
         return train_item_inds, train_ctx_inds, train_x_inds, test_x_item_inds, test_x_ctx_inds
     
@@ -292,59 +342,77 @@ class DisjointDomainNet(nn.Module):
         
         return train_item_inds, train_ctx_inds, train_x_inds, test_x_inds
     
-    def prepare_combo_testing(self):
+    def prepare_combo_testing(self, n_per_domain=1):
         """
         For each domain, pick one item/context pair to hold out.
-        Hold out a different one for each domain (assume this is possible, for now).
+        If possible, hold out a different one of each for each domain.
+        Otherwise, at least try to ensure that each item and context within each domain is unique.
         """
-        item_domain_starts = torch.arange(self.n_domains, device='cpu') * dd.ITEMS_PER_DOMAIN
-        ho_items = item_domain_starts + dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, self.n_domains)
+        n_holdout_total = n_per_domain * self.n_domains
+
+        if n_holdout_total <= dd.ITEMS_PER_DOMAIN:
+            # hold out different item for each domain
+            item_mods = dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, n_holdout_total)
+        elif n_per_domain <= dd.ITEMS_PER_DOMAIN:
+            item_mods = torch.cat([dd.choose_k_inds(dd.ITEMS_PER_DOMAIN, n_per_domain) for _ in range(self.n_domains)])
+        else:
+            raise ValueError(f'Cannot hold out {n_per_domain} combinations per domain - only {dd.ITEMS_PER_DOMAIN} items')
         
-        ho_contexts = dd.choose_k_inds(self.ctx_per_domain, self.n_domains)
+        # offset to match hold-out items with domains
+        item_domain_offsets = torch.repeat_interleave(torch.arange(0, self.n_items, dd.ITEMS_PER_DOMAIN, device='cpu'), n_per_domain)
+        ho_items = item_domain_offsets + item_mods
+        
+        if n_holdout_total <= self.ctx_per_domain:
+            ho_contexts = dd.choose_k_inds(self.ctx_per_domain, n_holdout_total)
+        elif n_per_domain <= self.ctx_per_domain:
+            ho_contexts = torch.cat([dd.choose_k_inds(self.ctx_per_domain, n_per_domain) for _ in range(self.n_domains)])
+        else:
+            raise ValueError(f'Cannot hold out {n_per_domain} combinations per domain - only {self.ctx_per_domain} contexts')
+
         if not self.share_ctx:
-            # offset so one context is held out from each domain
-            ho_contexts += torch.arange(self.n_domains, device='cpu') * self.ctx_per_domain
+            # offset to match hold-out contexts with domains
+            ho_contexts += torch.repeat_interleave(torch.arange(0, self.n_contexts, self.ctx_per_domain, device='cpu'), n_per_domain)
 
         print('Holding out: ' + ', '.join(
             [f'{self.item_names[ii]}/{self.context_names[ci]}' for ii, ci in zip(ho_items, ho_contexts)]
         ))
         
-        train_x_inds = np.arange(self.n_inputs)
-        test_x_inds = np.zeros(self.n_domains)
+        test_x_inds = np.zeros(n_holdout_total)
         
         # Find indices of held out combos in full input arrays
-        for k_domain in range(self.n_domains):
-            b_x_item_ho = self.x_item.eq(self.items[ho_items[k_domain]]).all(axis=1).cpu()
-            b_x_ctx_ho = self.x_context.eq(self.contexts[ho_contexts[k_domain]]).all(axis=1).cpu()
+        for k in range(n_holdout_total):
+            b_x_item_ho = self.x_item.eq(self.items[ho_items[k]]).all(axis=1).cpu()
+            b_x_ctx_ho = self.x_context.eq(self.contexts[ho_contexts[k]]).all(axis=1).cpu()
             b_x_ho = b_x_item_ho & b_x_ctx_ho
             
             assert torch.sum(b_x_ho) == 1, 'Uh-oh'            
             ind = torch.flatten(torch.nonzero(b_x_ho))[0]
-            train_x_inds = np.setdiff1d(train_x_inds, ind)
-            test_x_inds[k_domain] = ind
+            test_x_inds[k] = ind
+            
+        train_x_inds = np.setdiff1d(np.arange(self.n_inputs), test_x_inds)
 
         return train_x_inds, test_x_inds
             
-    def prepare_snapshots(self, snap_freq, snap_freq_scale, num_epochs):
+    def prepare_snapshots(self, snap_freq, snap_freq_scale, num_epochs, **_extra):
         """Make tensors to hold representation snapshots and return some relevant info"""
 
         # Find exactly which epochs to take snapshots (could be on log scale)
-        snap_epochs = dd.calc_snap_epochs(snap_freq, snap_freq_scale, num_epochs)
+        snap_epochs = util.calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale)
 
         epoch_digits = len(str(snap_epochs[-1]))
         n_snaps = len(snap_epochs)
         
         snaps = {}
         if self.use_item_repr:
-            snaps['item'] = torch.full((n_snaps, self.n_items, self.item_repr_size), np.nan)
+            snaps['item'] = torch.full((n_snaps, self.n_items, self.item_repr_units), np.nan)
             snaps['item_preact'] = snaps['item'].clone()
         if self.use_ctx_repr:
-            snaps['context'] = torch.full((n_snaps, self.n_contexts, self.ctx_repr_size), np.nan)
+            snaps['context'] = torch.full((n_snaps, self.n_contexts, self.ctx_repr_units), np.nan)
             snaps['context_preact'] = snaps['context'].clone()
 
-        snaps['item_hidden'] = torch.full((n_snaps, self.n_items, self.hidden_size), np.nan)
+        snaps['item_hidden'] = torch.full((n_snaps, self.n_items, self.hidden_units), np.nan)
         if self.use_ctx:
-            snaps['context_hidden'] = torch.full((n_snaps, self.n_contexts, self.hidden_size), np.nan)
+            snaps['context_hidden'] = torch.full((n_snaps, self.n_contexts, self.hidden_units), np.nan)
         
         # versions of hidden layer snapshots that average over the other inputs rather than inputting zeros
         snaps['item_hidden_mean'] = snaps['item_hidden'].clone()
@@ -359,7 +427,6 @@ class DisjointDomainNet(nn.Module):
         snaps['attr_preact'] = snaps['attr'].clone()
         
         return snap_epochs, epoch_digits, snaps
-
 
     def generalize_test(self, batch_size, optimizer, included_inds, targets, max_epochs=2000, thresh=0.99):
         """
@@ -391,12 +458,7 @@ class DisjointDomainNet(nn.Module):
         etg_string = '= ' + str(epochs + 1) if epochs < max_epochs else '> ' + str(max_epochs)
         return epochs, etg_string
 
-
-    def do_training(self, lr, num_epochs, batch_size, report_freq,
-                    snap_freq, snap_freq_scale='lin', scheduler=None,
-                    holdout_testing='full', reports_per_test=1,
-                    test_thresh=0.99, test_max_epochs=2000,
-                    do_combo_testing=False, param_snapshots=False):
+    def do_training(self, **train_params):
         """
         Train the network for the specified number of epochs, etc.
         Return representation snapshots, training reports, and snapshot/report epochs.
@@ -414,24 +476,26 @@ class DisjointDomainNet(nn.Module):
         If param snapshots is true, also returns all weights and biases of the network at
         each snapshot epoch.
         """
+
+        # Merge default params with overrides
+        p = {**train_defaults, **train_params}
         
-        optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+        optimizer = torch.optim.SGD(self.parameters(), lr=p['lr'])
         
-        if holdout_testing is not None:
-            holdout_testing = holdout_testing.lower()
+        holdout_testing = p['holdout_testing'].lower() if p['holdout_testing'] is not None else None
         do_holdout_testing = holdout_testing is not None and holdout_testing != 'none'
         holdout_item = holdout_testing in ['full', 'item']
         holdout_ctx = holdout_testing in ['full', 'context', 'ctx']
         
-        if do_holdout_testing and do_combo_testing:
+        if do_holdout_testing and p['do_combo_testing']:
             raise NotImplementedError("That's too much, man - I'm not doing both holdout and combo testing!")
         
         train_item_inds = np.arange(self.n_items)
         train_ctx_inds = np.arange(self.n_contexts)
         train_x_inds = np.arange(self.n_inputs)
-        test_x_item_inds = test_x_ctx_inds = None # for holdout testing
-        included_inds_item = included_inds_ctx = None # for holdout testing
-        test_x_inds = None # for combo testing
+        test_x_item_inds = test_x_ctx_inds = None  # for holdout testing
+        included_inds_item = included_inds_ctx = None  # for holdout testing
+        test_x_inds = None  # for combo testing
         
         if do_holdout_testing:
             if holdout_testing == 'domain':
@@ -444,33 +508,34 @@ class DisjointDomainNet(nn.Module):
                 included_inds_item = np.concatenate([train_x_inds, test_x_item_inds])
                 included_inds_ctx = np.concatenate([train_x_inds, test_x_ctx_inds])
                 
-        elif do_combo_testing:
-            train_x_inds, test_x_inds = self.prepare_combo_testing()
+        elif p['do_combo_testing']:
+            train_x_inds, test_x_inds = self.prepare_combo_testing(n_per_domain=p['n_combo_per_domain'])
             
         # (for snapshots)
         train_items = self.items[train_item_inds]
         train_contexts = self.contexts[train_ctx_inds]
 
-        etg_digits = len(str(test_max_epochs)) + 2
+        etg_digits = len(str(p['test_max_epochs'])) + 2
             
         n_inputs_train = len(train_x_inds)
 
-        snap_epochs, epoch_digits, snaps = self.prepare_snapshots(snap_freq, snap_freq_scale, num_epochs)
+        snap_epochs, epoch_digits, snaps = self.prepare_snapshots(**p)
         n_snaps = len(snap_epochs)
 
         params = {}
-        if param_snapshots:
+        if p['param_snapshots']:
             params = {pname: torch.empty((n_snaps, *p.shape)) for pname, p in self.named_parameters()}
 
-        n_report = (num_epochs-1) // report_freq + 1
-        n_etg = (n_report-1) // reports_per_test + 1
+        n_report = (p['num_epochs']-1) // p['report_freq'] + 1
+        n_etg = (n_report-1) // p['reports_per_test'] + 1
         reports = dict()
         reports['loss'] = np.zeros(n_report)
         reports['accuracy'] = np.zeros(n_report)
         reports['weighted_acc'] = np.zeros(n_report)
+        reports['weighted_acc_loose'] = np.zeros(n_report)
         
         if holdout_item:
-            reports['etg_item'] = np.zeros(n_etg, dtype=int) # "epochs to generalize"
+            reports['etg_item'] = np.zeros(n_etg, dtype=int)  # "epochs to generalize"
             
         if holdout_ctx:
             reports['etg_context'] = np.zeros(n_etg, dtype=int)
@@ -478,11 +543,12 @@ class DisjointDomainNet(nn.Module):
         if holdout_testing == 'domain':
             reports['etg_domain'] = np.zeros(n_etg, dtype=int)
         
-        if do_combo_testing:
+        if p['do_combo_testing']:
             reports['test_accuracy'] = np.zeros(n_report)
             reports['test_weighted_acc'] = np.zeros(n_report)
+            reports['test_weighted_acc_loose'] = np.zeros(n_report)
 
-        for epoch in range(num_epochs):
+        for epoch in range(p['num_epochs']):
 
             # collect snapshot
             if epoch in snap_epochs:
@@ -491,36 +557,40 @@ class DisjointDomainNet(nn.Module):
                 with torch.no_grad():
                     
                     if self.use_item_repr:
-                        snaps['item_preact'][k_snap][train_item_inds] = self.calc_item_repr_preact(train_items)
-                        snaps['item'][k_snap][train_item_inds] = self.act_fn(snaps['item_preact'][k_snap][train_item_inds])
+                        item_preact = self.calc_item_repr_preact(train_items)
+                        snaps['item_preact'][k_snap][train_item_inds] = item_preact
+                        snaps['item'][k_snap][train_item_inds] = self.act_fn(item_preact)
                         
                     if self.use_ctx_repr:
-                        snaps['context_preact'][k_snap][train_ctx_inds] = self.calc_context_repr_preact(train_contexts)
-                        snaps['context'][k_snap][train_ctx_inds] = self.act_fn(snaps['context_preact'][k_snap][train_ctx_inds])
+                        ctx_preact = self.calc_context_repr_preact(train_contexts)
+                        snaps['context_preact'][k_snap][train_ctx_inds] = ctx_preact
+                        snaps['context'][k_snap][train_ctx_inds] = self.act_fn(ctx_preact)
                     
                     item_hidden_snaps_preact = self.calc_hidden_preact(item=train_items)
                     snaps['item_hidden'][k_snap][train_item_inds] = self.act_fn(item_hidden_snaps_preact)
                     
                     if self.use_ctx:
-                        snaps['context_hidden'][k_snap][train_ctx_inds] = self.act_fn(self.calc_hidden_preact(context=train_contexts))
+                        hidden_preact = self.calc_hidden_preact(context=train_contexts)
+                        snaps['context_hidden'][k_snap][train_ctx_inds] = self.act_fn(hidden_preact)
 
                         # versions that average over other input
+                        def get_matching_input_mats(this_input, this_x_mat, other_x_mat):
+                            x_inds = np.flatnonzero(this_x_mat.eq(this_input).all(axis=1).cpu())
+                            x_inds = np.intersect1d(x_inds, train_x_inds)
+                            other_inputs = other_x_mat[x_inds]
+                            this_inputs = this_input.unsqueeze(0).expand(len(other_inputs), -1)
+                            return this_inputs, other_inputs
+
                         # items, mean over contexts
                         for item_ind, item in zip(train_item_inds, train_items):
-                            x_inds = np.flatnonzero(self.x_item.eq(item).all(axis=1).cpu())
-                            x_inds = np.intersect1d(x_inds, train_x_inds)
-                            ctxs = self.x_context[x_inds]
-                            items = item.unsqueeze(0).expand(len(ctxs), -1)
+                            items, ctxs = get_matching_input_mats(item, self.x_item, self.x_context)
                             hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
                             snaps['item_hidden_mean_preact'][k_snap][item_ind] = torch.mean(hidden_reps, dim=0)
                             snaps['item_hidden_mean'][k_snap][item_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)
 
                         # contexts, mean over items
                         for ctx_ind, ctx in zip(train_ctx_inds, train_contexts):
-                            x_inds = np.flatnonzero(self.x_context.eq(ctx).all(axis=1).cpu())
-                            x_inds = np.intersect1d(x_inds, train_x_inds)
-                            items = self.x_item[x_inds]
-                            ctxs= ctx.unsqueeze(0).expand(len(items), -1)
+                            ctxs, items = get_matching_input_mats(ctx, self.x_context, self.x_item)
                             hidden_reps = self.calc_hidden_preact(item=items, context=ctxs)
                             snaps['context_hidden_mean_preact'][k_snap][ctx_ind] = torch.mean(hidden_reps, dim=0)
                             snaps['context_hidden_mean'][k_snap][ctx_ind] = torch.mean(self.act_fn(hidden_reps), dim=0)
@@ -535,75 +605,147 @@ class DisjointDomainNet(nn.Module):
                     snaps['attr_preact'][k_snap][train_item_inds] = item_map @ attr_snaps_preact
                     snaps['attr'][k_snap][train_item_inds] = item_map @ self.output_act_fn(attr_snaps_preact)
                     
-                    if param_snapshots:
+                    if p['param_snapshots']:
                         for pname, p in self.named_parameters():
                             params[pname][k_snap] = p
 
             # do training
             order = dd.choose_k(train_x_inds, n_inputs_train)
-            loss, acc_each, wacc_each = self.train_epoch(order, batch_size, optimizer)
-            if scheduler is not None:
-                scheduler.step()
+            loss, acc_each, wacc_each, wacc_loose_each = self.train_epoch(order, p['batch_size'], optimizer)
+            if p['scheduler'] is not None:
+                p['scheduler'].step()
 
             # report progress
-            if epoch % report_freq == 0:
-                k_report = epoch // report_freq
+            if epoch % p['report_freq'] == 0:
+                k_report = epoch // p['report_freq']
                 
                 with torch.no_grad():
                     mean_loss = loss.item() / n_inputs_train
                     mean_acc = torch.nansum(acc_each).item() / n_inputs_train
                     mean_wacc = torch.nansum(wacc_each).item() / n_inputs_train
+                    mean_wacc_loose = torch.nansum(wacc_loose_each).item() / n_inputs_train
 
-                report_str = f'Epoch {epoch:{epoch_digits}d} end: loss = {mean_loss:7.3f}, weighted acc = {mean_wacc:.3f}'
+                report_str = (f'Epoch {epoch:{epoch_digits}d} end: ' +
+                              f'loss = {mean_loss:7.3f}, ' +
+                              f'weighted acc = {mean_wacc:.3f}')
 
                 reports['loss'][k_report] = mean_loss
                 reports['accuracy'][k_report] = mean_acc
                 reports['weighted_acc'][k_report] = mean_wacc
+                reports['weighted_acc_loose'][k_report] = mean_wacc_loose
 
-                if do_holdout_testing and k_report % reports_per_test == 0:
-                    k_test = k_report // reports_per_test
+                if do_holdout_testing and k_report % p['reports_per_test'] == 0:
+                    k_test = k_report // p['reports_per_test']
                     
                     # Do item and context generalize tests separately
                     if holdout_item:
                         item_etg, item_etg_string = self.generalize_test(
-                            batch_size, optimizer, included_inds_item, test_x_item_inds,
-                            thresh=test_thresh, max_epochs=test_max_epochs
+                            p['batch_size'], optimizer, included_inds_item, test_x_item_inds,
+                            thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                         )
                         report_str += f', epochs for new item = {item_etg_string:>{etg_digits}}'
                         reports['etg_item'][k_test] = item_etg
                     
                     if holdout_ctx:
                         ctx_etg, ctx_etg_string = self.generalize_test(
-                            batch_size, optimizer, included_inds_ctx, test_x_ctx_inds,
-                            thresh=test_thresh, max_epochs=test_max_epochs
+                            p['batch_size'], optimizer, included_inds_ctx, test_x_ctx_inds,
+                            thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                         )
                         report_str += f', epochs for new context = {ctx_etg_string:>{etg_digits}}'
                         reports['etg_context'][k_test] = ctx_etg
                         
                     if holdout_testing == 'domain':
                         domain_etg, domain_etg_string = self.generalize_test(
-                            batch_size, optimizer, np.arange(self.n_inputs), test_x_inds,
-                            thresh=test_thresh, max_epochs=test_max_epochs
+                            p['batch_size'], optimizer, np.arange(self.n_inputs), test_x_inds,
+                            thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                         )
                         report_str += f', epochs for new domain {domain_etg_string:>{etg_digits}}'
                         reports['etg_domain'][k_test] = domain_etg
                         
-                if do_combo_testing:
+                if p['do_combo_testing']:
                     with torch.no_grad():
                         outputs = self(self.x_item[test_x_inds], self.x_context[test_x_inds])
                         test_acc = torch.mean(self.b_outputs_correct(outputs, test_x_inds)).item()
                         test_wacc = torch.mean(self.weighted_acc(outputs, test_x_inds)).item()
+                        test_wacc_loose = torch.mean(self.weighted_acc_loose(outputs, test_x_inds)).item()
                         
                         report_str += f', test weighted acc = {test_wacc:.3f}'
                         reports['test_accuracy'][k_report] = test_acc
                         reports['test_weighted_acc'][k_report] = test_wacc
+                        reports['test_weighted_acc_loose'][k_report] = test_wacc_loose
                                         
                 print(report_str)
 
         snaps_cpu = {stype: s.cpu().numpy() for stype, s in snaps.items()}
         ret_dict = {'snaps': snaps_cpu, 'reports': reports}
         
-        if param_snapshots:
+        if p['param_snapshots']:
             ret_dict['params'] = {pname: p.cpu().numpy() for pname, p in params.items()}
         
         return ret_dict
+
+
+def train_n_nets(n=36, run_type='', net_params=None, train_params=None):
+    """Do a series of runs and save results"""
+
+    combined_net_params = net_defaults.copy()
+    if net_params is not None:
+        for key, val in net_params.items():
+            if key not in combined_net_params:
+                raise KeyError(f'Unrecognized net param {key}')
+            combined_net_params[key] = val
+            
+    combined_train_params = train_defaults.copy()
+    if train_params is not None:
+        for key, val in train_params.items():
+            if key not in combined_train_params:
+                raise KeyError(f'Unrecognized train param {key}')
+            combined_train_params[key] = val
+
+    snaps_all = []
+    reports_all = []
+    parameters_all = []
+    ys_all = []
+
+    net = None
+    for i in range(n):
+        print(f'Training Iteration {i + 1}')
+        print('---------------------')
+
+        net = DisjointDomainNet(**combined_net_params)
+        res = net.do_training(**combined_train_params)
+
+        snaps_all.append(res['snaps'])
+        reports_all.append(res['reports'])
+        if 'params' in res:
+            parameters_all.append(res['params'])
+
+        ys_all.append(net.y.cpu().numpy())
+
+        print('')
+
+    snaps = {}
+    for snap_type in snaps_all[0].keys():
+        snaps[snap_type] = np.stack([snaps_one[snap_type] for snaps_one in snaps_all])
+
+    reports = {}
+    for report_type in reports_all[0].keys():
+        reports[report_type] = np.stack([reports_one[report_type] for reports_one in reports_all])
+
+    if len(parameters_all) > 0:
+        parameters = {}
+        for param_type in parameters_all[0].keys():
+            parameters[param_type] = np.stack([params_one[param_type] for params_one in parameters_all])
+    else:
+        parameters = None
+
+    ys = np.stack(ys_all)
+
+    if run_type != '':
+        run_type += '_'
+
+    save_name = f'data/{run_type}dd_res_{dt.now():%Y-%m-%d_%H-%M-%S}.npz'
+    np.savez(save_name, snapshots=snaps, reports=reports, ys=ys, net_params=combined_net_params,
+             train_params=combined_train_params, parameters=parameters)
+
+    return save_name, net

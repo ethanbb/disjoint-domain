@@ -392,19 +392,20 @@ def normalize_cluster_info(cluster_info):
     return cluster_info
 
 
-def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info):
+def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info, padding_attrs=0):
     """
     Wrapper to make any set of attr vectors (returns a list of one matrix per context)
     If cluster_info is a list, should be of length ctx_per_domain. In this case the corrresponding
     cluster info is used to generate each context's attributes.
-    """
+    """    
     if isinstance(cluster_info, list):
         assert len(cluster_info) == ctx_per_domain, (
             f'Length of cluster_info {len(cluster_info)} does not match number of contexts {ctx_per_domain}')
         # Generate attribute vectors for each context individually and concatenate
         return sum([make_attr_vecs(1, attrs_per_context, attrs_set_per_item, cifo) for cifo in cluster_info], [])
     
-    if attrs_set_per_item > attrs_per_context:
+    attrs_used_per_context = attrs_per_context - padding_attrs
+    if attrs_set_per_item > attrs_used_per_context:
         raise ValueError('Cannot set more attrs per item than # allocated to each context')
 
     cluster_info = normalize_cluster_info(cluster_info)
@@ -426,7 +427,7 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         except KeyError:
             raise ValueError('Invalid clusters specification')
 
-    attr_vecs = attr_vec_fn(ctx_per_domain, attrs_per_context, attrs_set_per_item, **cluster_info)
+    attr_vecs = attr_vec_fn(ctx_per_domain, attrs_used_per_context, attrs_set_per_item, **cluster_info)
 
     # special case for shuffled attribute-item assignments keeping same mean
     # attr frequency for each item
@@ -443,13 +444,17 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         
     if 'item_permutation' in cluster_info:
         attr_vecs = [mat[cluster_info['item_permutation'], :] for mat in attr_vecs]
+        
+    if padding_attrs != 0:
+        attr_vecs = [np.concatenate([mat, np.zeros((mat.shape[0], padding_attrs))], axis=1) for mat in attr_vecs]
 
     return attr_vecs
 
 
-def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
+def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, padding_attrs=0,
                  n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None,
-                 repeat_attrs_over_domains=False, share_ctx=False, **_extra):
+                 repeat_attrs_over_domains=False, share_ctx=False, share_attr_units_in_domain=False,
+                 **_extra):
     """
     Make the actual item, context, and attribute matrices, across a given number of domains.
     If one_equidistant is true, replaces the last domain's attrs with equidistant attr vectors.
@@ -457,6 +462,7 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     By default (when None), last_domain_clusters is the same as clusters.
     repeat_attrs_over_domains - if True, don't regenerate attrs for each domain, just repeat them.
     share_ctx - if True, use one bank of context units for all domains.
+    share_attr_units_in_domain - if True, all contexts in a domain use the same attr units; if not they are disjoint.
     """
 
     # First make it for a single domain, then use block_diag to replicate.
@@ -475,23 +481,31 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
     else:
         last_is_same = False
 
+    if share_attr_units_in_domain:
+        def make_domain_attrs(attrs_per_ctx):
+            return np.concatenate(attrs_per_ctx, axis=0)
+    else:
+        def make_domain_attrs(attrs_per_ctx):
+            return block_diag(*attrs_per_ctx)
+
     if repeat_attrs_over_domains:
-        domain_attrs = make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                      attrs_set_per_item, cluster_info)
+        domain_attr_list = make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                          attrs_set_per_item, cluster_info, padding_attrs)
         if last_is_same:
-            attr_mat = block_diag(*([block_diag(*domain_attrs)] * n_domains))
+            attr_mat = block_diag(*([make_domain_attrs(domain_attr_list)] * n_domains))
         else:
-            domain_attrs_last = make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                               attrs_set_per_item, last_domain_cluster_info)
-            attr_mat = block_diag(*([block_diag(*domain_attrs)] * (n_domains - 1) + [block_diag(*domain_attrs_last)]))
+            domain_attr_list_last = make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                                   attrs_set_per_item, last_domain_cluster_info, padding_attrs)
+            attr_mat = block_diag(*([make_domain_attrs(domain_attr_list)] * (n_domains - 1) +
+                                    [make_domain_attrs(domain_attr_list_last)]))
     else:
         # New behavior: generate a new set of attr vecs for each domain.
-        domain_attrs = [make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                       attrs_set_per_item, cluster_info)
-                        for _ in range(n_domains - 1)]
-        domain_attrs.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                           attrs_set_per_item, last_domain_cluster_info))
-        attr_mat = block_diag(*[block_diag(*attrs) for attrs in domain_attrs])
+        domain_attr_list = [make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                           attrs_set_per_item, cluster_info, padding_attrs)
+                            for _ in range(n_domains - 1)]
+        domain_attr_list.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                               attrs_set_per_item, last_domain_cluster_info, padding_attrs))
+        attr_mat = block_diag(*[make_domain_attrs(attrs) for attrs in domain_attr_list])
 
     return item_mat, context_mat, attr_mat
 
@@ -587,7 +601,7 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
 
     if io_mats is None:
         item_mat, context_mat, attr_mat = make_io_mats(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                                                   n_domains=1, cluster_info=cluster_info)
+                                                       n_domains=1, cluster_info=cluster_info)
     else:
         item_mat, context_mat, attr_mat = io_mats
 
@@ -615,6 +629,7 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
     ax3.set_xticks(range(0, attr_mat.shape[1], 10))
 
     return ax1, ax2, ax3
+
 
 def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
                            cluster_info='4-2-2', metric='euclidean'):
@@ -646,35 +661,6 @@ def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=
     ax.set_xlabel(f'{metric.capitalize()} distance')
     ax.set_ylabel('Input #')
     return ax
-
-
-def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
-    """Establish floating-point type and device to use with PyTorch"""
-
-    if device is None:
-        if use_cuda_if_possible and torch.cuda.is_available():
-            device = torch.device('cuda')
-        else:
-            device = torch.device('cpu')
-    else:
-        device = torch.device(device)
-
-    if device.type == 'cuda':
-        ttype_ns = torch.cuda
-    else:
-        ttype_ns = torch
-
-    if torchfp is None:
-        torchfp = torch.float
-
-    if torchfp == torch.float:
-        torch.set_default_tensor_type(ttype_ns.FloatTensor)
-    elif torchfp == torch.double:
-        torch.set_default_tensor_type(ttype_ns.DoubleTensor)
-    else:
-        raise NotImplementedError(f'No tensor type known for dtype {torchfp}')
-
-    return device, torchfp
 
 
 def item_group(n=slice(None), clusters='4-2-2', **_extra):
@@ -746,24 +732,3 @@ def get_contexts(n_domains=4, ctx_per_domain=4, share_ctx=False, **_extra):
         contexts = torch.eye(ctx_per_domain * n_domains)
         context_names = [domain_name(d) + str(n + 1) for d in range(n_domains) for n in range(ctx_per_domain)]
     return contexts, context_names
-
-
-def get_net_dims(n_domains=4, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, **_extra):
-    """Get some basic facts about the default architecture, possibly with overrides"""
-    n_items = ITEMS_PER_DOMAIN * n_domains
-    n_ctx = ctx_per_domain * n_domains
-
-    return ctx_per_domain, n_domains, n_items, n_ctx, attrs_per_context, attrs_set_per_item
-
-
-def calc_snap_epochs(snap_freq, snap_freq_scale, num_epochs):
-    """Given the possibility of taking snapshots on a log scale, get the actual snapshot epochs"""
-    if snap_freq_scale == 'log':
-        snap_epochs = np.arange(0, np.log2(num_epochs), snap_freq)
-        snap_epochs = np.exp2(snap_epochs)
-    elif snap_freq_scale == 'lin':
-        snap_epochs = np.arange(0, num_epochs, snap_freq)
-    else:
-        raise ValueError(f'Unkonwn snap_freq_scale {snap_freq_scale}')
-
-    return list(np.unique(np.round(snap_epochs).astype(int)))

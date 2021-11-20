@@ -2,42 +2,36 @@
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
+from typing import Callable
 
 import util
 
 
-def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
-                        include_individual=False):
+def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_individual=False):
     """
-    Make distance matrices (RDMs) of given representations of instances of some input type,
+    Make matrices of some function on pairs of input representations, such as distance or correlation,
     averaged over training runs.
 
     repr_snaps is a n_runs x n_snap_epochs x n_inputs x n_rep array, where
     n_inputs is the number of input instances and n_rep is the size of the representation.
 
     Outputs a dict with keys:
-    'all': gives the mean distances between all representations over
-    all epochs. This is useful for making an MDS map of the training process.
-
-    'snaps': gives the mean distsances between items or contexts at each
-    recorded epoch. This is the n_inputs x n_inputs block diagonal of dists_all, stacked.
+        'snaps': gives the mean values of the function over runs between all pairs of inputs for each
+        recorded epoch, with dimension 0 corresponding to epoch.
     
-    If calc_all is False, only computes the distances within each epoch. (Distances across
-    epochs are generally only used to make an MDS plot.)
-    
-    If include_individual is True, includes snaps_each which is not meaned across runs.
+        'all': only included if calc_all is True. Gives mean values of the function calculated on all possible
+        pairs of conditions, where a condition is an (input, epoch) pair. This is useful for making an MDS map
+        of the training process. The nth n_inputs x n_inputs block diagonal entry of the resulting matrix is 
+        identical to the nth subarray (along dimension 0) in 'snaps'.
+        
+        'snaps_each': only included if include_individual is True. Same as 'snaps' but without averaging
+        across runs, so dimension 0 is runs and dimension 1 is epochs.
     """
-
-    def dist_fn(snaps):
-        if metric == 'spearman':
-            return 1 - stats.spearmanr(snaps, axis=1)[0]
-        else:
-            return distance.squareform(distance.pdist(snaps, metric=metric))
     
     if calc_all:
         n_runs, n_snap_epochs, n_inputs, n_rep = repr_snaps.shape
         snaps_flat = np.reshape(repr_snaps, (n_runs, n_snap_epochs * n_inputs, n_rep))        
-        dists_all = np.stack([dist_fn(run_snaps) for run_snaps in snaps_flat])
+        dists_all = np.stack([pairwise_fn(run_snaps) for run_snaps in snaps_flat])
         mean_dists_all = np.nanmean(dists_all, axis=0)
 
         mean_dists_snaps = np.empty((n_snap_epochs, n_inputs, n_inputs))
@@ -60,7 +54,7 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
     else:
         # Directly calculate distances at each epoch
         dists_snaps = np.stack([
-            np.stack([dist_fn(epoch_snaps) for epoch_snaps in run_snaps])
+            np.stack([pairwise_fn(epoch_snaps) for epoch_snaps in run_snaps])
             for run_snaps in repr_snaps
         ])
         mean_dists_snaps = np.nanmean(dists_snaps, axis=0)
@@ -70,9 +64,29 @@ def get_mean_repr_dists(repr_snaps, metric='euclidean', calc_all=True,
         else:
             return {'snaps': mean_dists_snaps}
 
+        
+def calc_mean_repr_dists(repr_snaps, metric='euclidean'):
+    def dist_fn(snaps):
+        return distance.squareform(distance.pdist(snaps, metric=metric))
+    
+    return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, calc_all=True)
 
-def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='correlation', calc_all_repr_dists=False, 
-                     include_individual_rdms=False, extra_keys=None):
+
+def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual=False):
+    if corr_type == 'pearson':
+        def corr_fn(snaps):
+            return np.corrcoef(snaps)
+    elif corr_type == 'spearman':
+        def corr_fn(snaps):
+            return stats.spearmanr(snaps, axis=1)[0]
+    else:
+        raise ValueError(f'Unrecognized correlation type "{corr_type}"')
+    
+    return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual)
+        
+
+def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
+                     compute_full_rdms=False, include_individual_corr_mats=False, extra_keys=None):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -105,10 +119,16 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     report_cis = {report_type: rstats[1] for report_type, rstats in report_stats.items()}
 
     if len(snaps) > 0:
-        extra['repr_dists'] = {
-            snap_type: get_mean_repr_dists(repr_snaps, metric=dist_metric, calc_all=calc_all_repr_dists,
-                                           include_individual=include_individual_rdms)
-            for snap_type, repr_snaps in snaps.items()} 
+        if compute_full_rdms:
+            extra['repr_dists'] = {
+                snap_type: calc_mean_repr_dists(repr_snaps, metric=dist_metric)
+                for snap_type, repr_snaps in snaps.items()
+            }
+            
+        extra['repr_corr'] = {
+            snap_type: calc_mean_repr_corr(repr_snaps, corr_type=corr_type, include_individual=include_individual_corr_mats)
+            for snap_type, repr_snaps in snaps.items()
+        }
         
         try:
             snap_freq_scale = train_params['snap_freq_scale']
@@ -163,17 +183,41 @@ def plot_individual_reports(ax, res, report_type, title=None, **plot_params):
     util.outside_legend(ax, ncol=2, fontsize='x-small')
     
     
-def plot_rsa(ax, res, snap_type, snap_ind, labels, title_addon=None,
-             colorbar=True, rsa_mat=None, tick_fontsize='x-small'):
+def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None,
+             colorbar=True, actual_rdm=None, tick_fontsize='x-small'):
     """
-    Plot an RSA matrix for the representation of items or contexts at a particular epoch
-    If 'rsa_mat' is provided, overrides the matrix to plot.
+    Plot a representational dissimilarity matrix (RDM) for the representation of inputs at a particular epoch.
+    If 'actual_rdm' is provided, overrides the matrix to plot.
     """
-    if rsa_mat is None:
-        rsa_mat = res['repr_dists'][snap_type]['snaps'][snap_ind]
+    if actual_rdm is None:
+        rdm = res['repr_dists'][snap_type]['snaps'][snap_ind]
+    else:
+        rdm = actual_rdm
 
-    image = util.plot_matrix_with_labels(ax, rsa_mat, labels, colorbar=colorbar, tick_fontsize=tick_fontsize)
+    image = util.plot_matrix_with_labels(ax, rdm, labels, colorbar=colorbar, tick_fontsize=tick_fontsize, bipolar=False)
 
+    title = f'Epoch {res["snap_epochs"][snap_ind]}'
+    if title_addon is not None:
+        title += f'\n({title_addon})'
+    ax.set_title(title)
+
+    return image
+
+
+def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
+                   colorbar=True, actual_mat=None, tick_fontsize='x-small'):
+    """
+    Plot a matrix of the correlation between input representations at a particular epoch.
+    If actual_mat is provided, overrides the matrix to plot.
+    """
+    if actual_mat is None:
+        mat = res['repr_corr'][snap_type]['snaps'][snap_ind]
+    else:
+        mat = actual_mat
+        
+    image = util.plot_matrix_with_labels(ax, mat, labels, colorbar=colorbar, tick_fontsize=tick_fontsize,
+                                         bipolar=True, max_val=1.0)
+    
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
         title += f'\n({title_addon})'

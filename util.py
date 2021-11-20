@@ -3,6 +3,7 @@ import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
 from mpl_toolkits import axes_grid1
+import seaborn as sns
 
 
 def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
@@ -100,22 +101,36 @@ def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
     return im.axes.figure.colorbar(im, cax=cax, **kwargs)
 
 
-def imshow_centered_bipolar(ax, mat, **imshow_args):
-    """Plot an image/matrix with a blue (negative) to red (positive) colormap, with white at the center"""
-    max_absval = np.max(np.abs(mat))
-    return ax.imshow(mat, cmap='seismic', vmin=-max_absval,
+def imshow_pos(ax, mat, max_val=None, **imshow_args):
+    """Plot an image/matrix with only nonnegative values using a perceptually uniform color palette"""
+    if np.any(mat < 0):
+        raise ValueError('Matrix must be nonnegative to use imshow_pos')
+    
+    cmap = sns.color_palette('rocket', as_cmap=True)
+    if max_val is None:
+        max_val = np.max(mat)
+    return ax.imshow(mat, cmap=cmap, vmin=0, vmax=max_val, interpolation='nearest', **imshow_args)
+
+
+def imshow_centered_bipolar(ax, mat, max_absval=None, **imshow_args):
+    """Plot an image/matrix with a good diverging color palette, with the neutral color at 0"""
+    cmap = sns.color_palette('icefire', as_cmap=True)
+    if max_absval is None:
+        max_absval = np.max(np.abs(mat))
+    return ax.imshow(mat, cmap=cmap, vmin=-max_absval,
                      vmax=max_absval, interpolation='nearest', **imshow_args)
 
 
 def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
-                            tick_fontsize='medium', **imshow_args):
+                            tick_fontsize='medium', bipolar=True, max_val=None, **imshow_args):
     """Helper to plot matrix with each row labeled with 'labels' and also each column if desired."""       
     n = len(labels)
     assert n == mat.shape[0], 'Wrong number of labels'
     if label_cols:
         assert mat.shape[0] == mat.shape[1], 'Matrix must be square'
     
-    image = imshow_centered_bipolar(ax, mat, **imshow_args)
+    plot_fn = imshow_centered_bipolar if bipolar else imshow_pos
+    image = plot_fn(ax, mat, max_val, **imshow_args)
 
     ax.set_yticks(range(n))
     ax.set_yticklabels(labels)

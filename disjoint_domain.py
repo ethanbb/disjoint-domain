@@ -699,7 +699,7 @@ def get_domain_colors():
     ]
 
 
-def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, **_extra):
+def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, device=None, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
     if isinstance(cluster_info, list):
         # Can't assign symbols because the clusters vary over contexts
@@ -712,7 +712,7 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
                                 else normalize_cluster_info(last_domain_cluster_info))
 
-    items = torch.eye(ITEMS_PER_DOMAIN * n_domains)
+    items = torch.eye(ITEMS_PER_DOMAIN * n_domains, device=device)
     all_clusters = [cluster_info['clusters']] * n_domains
     if last_domain_cluster_info is not None:
         all_clusters[-1] = last_domain_cluster_info['clusters']
@@ -723,12 +723,12 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     return items, item_names
 
 
-def get_contexts(n_domains=4, ctx_per_domain=4, share_ctx=False, **_extra):
+def get_contexts(n_domains=4, ctx_per_domain=4, share_ctx=False, device=None, **_extra):
     """Get context tensors (without repetitions) and their corresponding names"""
     if share_ctx:
-        contexts = torch.eye(ctx_per_domain)
+        contexts = torch.eye(ctx_per_domain, device=device)
         context_names = [str(n + 1) for n in range(ctx_per_domain)]
     else:
-        contexts = torch.eye(ctx_per_domain * n_domains)
+        contexts = torch.eye(ctx_per_domain * n_domains, device=device)
         context_names = [domain_name(d) + str(n + 1) for d in range(n_domains) for n in range(ctx_per_domain)]
     return contexts, context_names

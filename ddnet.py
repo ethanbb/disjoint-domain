@@ -204,9 +204,10 @@ class DisjointDomainNet(nn.Module):
         # individual item/context tensors for evaluating the network
         self.items, self.item_names = dd.get_items(
             n_domains=self.n_domains, cluster_info=self.cluster_info,
-            last_domain_cluster_info=self.last_domain_cluster_info)
+            last_domain_cluster_info=self.last_domain_cluster_info, device=self.device)
         self.contexts, self.context_names = dd.get_contexts(
-            n_domains=self.n_domains, ctx_per_domain=self.ctx_per_domain, share_ctx=self.share_ctx)
+            n_domains=self.n_domains, ctx_per_domain=self.ctx_per_domain,
+            share_ctx=self.share_ctx, device=self.device)
 
     def calc_item_repr_preact(self, item):
         assert self.use_item_repr, 'No item representation to calculate'
@@ -443,7 +444,7 @@ class DisjointDomainNet(nn.Module):
         epochs = 0
         while epochs < max_epochs:
             order = dd.choose_k(included_inds, len(included_inds))
-            _, _, wacc_each = self.train_epoch(order, batch_size, optimizer)
+            wacc_each = self.train_epoch(order, batch_size, optimizer)[2]
 
             acc_targets = torch.mean(wacc_each[targets])
             if acc_targets >= thresh:

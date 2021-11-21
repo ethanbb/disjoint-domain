@@ -7,28 +7,14 @@ import matplotlib.pyplot as plt
 import torch
 from typing import Dict, Any
 
+import util
+
 ITEMS_PER_DOMAIN = 8
 
-
-def choose_k_inds(n, k=1):
-    """Get random permutation of k indices in range(n)"""
-    if k > n:
-        raise ValueError(f'Cannot pick {k} unique indices from range({n})')
-    return torch.randperm(n, device='cpu')[:k]
-
-
-def choose_k(a, k=1):
-    """
-    Get permutation of k items from a using PyTorch
-    (want to make sure we use the same rng for everything so it's deterministic given the seed)
-    """
-    # need to use .numpy() here, or else a vector of length 1 will become a scalar
-    return a[choose_k_inds(len(a), k).numpy()]
-
-
-def choose_k_set_bits(a, k=1):
-    """Get permutation of k indices of a that are set (a should be a boolean array)"""
-    return choose_k(np.flatnonzero(a), k)
+# make some util functions available under this namespace
+choose_k_inds = util.choose_k_inds
+choose_k = util.choose_k
+choose_k_set_bits = util.choose_k_set_bits
 
 
 def get_cluster_sizes(clusters):

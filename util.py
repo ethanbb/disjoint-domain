@@ -38,6 +38,31 @@ def init_torch(device=None, torchfp=None, use_cuda_if_possible=True):
     return device, torchfp, zeros_fn
 
 
+def choose_k_inds(n, k=1):
+    """Get random permutation of k indices in range(n)"""
+    if k > n:
+        raise ValueError(f'Cannot pick {k} unique indices from range({n})')
+    return torch.randperm(n, device='cpu')[:k]
+
+
+def choose_k(a, k=1):
+    """
+    Get permutation of k items from a using PyTorch
+    (want to make sure we use the same rng for everything so it's deterministic given the seed)
+    """
+    # need to use .numpy() here, or else a vector of length 1 will become a scalar
+    return a[choose_k_inds(len(a), k).numpy()]
+
+
+def permute(a):
+    return choose_k(a, len(a))
+
+
+def choose_k_set_bits(a, k=1):
+    """Get permutation of k indices of a that are set (a should be a boolean array)"""
+    return choose_k(np.flatnonzero(a), k)
+
+
 def get_mean_and_ci(series_set):
     """
     Given a set of N time series, compute and return the mean

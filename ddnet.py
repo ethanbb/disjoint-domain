@@ -23,7 +23,7 @@ net_defaults = {
 
 train_defaults = {
     'lr': 0.01,
-    'num_epochs': 3001,
+    'num_epochs': 3000,
     'batch_size': 16,
     'report_freq': 50,
     'snap_freq': 50,
@@ -215,9 +215,9 @@ class DisjointDomainNet(nn.Module):
 
     def calc_hidden_preact(self, item=None, context=None):
         if item is None:
-            item = self.dummy_item.expand((context.shape[0] if context is not None else 1), 1)
+            item = self.dummy_item.expand((context.shape[0] if context is not None else 1), -1)
         if context is None:
-            context = self.dummy_ctx.expand(item.shape[0], 1)
+            context = self.dummy_ctx.expand(item.shape[0], -1)
             
         irep = self.item_to_rep(item) + self.item_rep_bias
         crep = self.ctx_to_rep(context) + self.ctx_rep_bias
@@ -259,16 +259,34 @@ class DisjointDomainNet(nn.Module):
         outputs_binary = (outputs > 0.5).to(self.torchfp)
         return self.weighted_acc(outputs_binary, batch_inds)
 
+    def evaluate_input_set(self, input_inds, mean=True):
+        """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs (e.g. train or test)"""
+        acc_each = torch.full((self.n_inputs,), np.nan)
+        wacc_each = acc_each.clone()
+        wacc_loose_each = acc_each.clone()
+
+        with torch.no_grad():
+            outputs = self(self.x_item[input_inds], self.x_context[input_inds])
+            loss = self.criterion(outputs, self.y[input_inds])
+            acc_each[input_inds] = torch.mean(self.b_outputs_correct(outputs, input_inds), dim=1)
+            wacc_each[input_inds] = self.weighted_acc(outputs, input_inds)
+            wacc_loose_each[input_inds] = self.weighted_acc_loose(outputs, input_inds)
+
+        if not mean:
+            return loss, acc_each, wacc_each, wacc_loose_each
+        else:
+            loss /= len(input_inds)
+            acc = acc_each.nanmean().item()
+            wacc = wacc_each.nanmean().item()
+            wacc_loose = wacc_loose_each.nanmean().item()
+            return loss, acc, wacc, wacc_loose
+
     def train_epoch(self, order, batch_size, optimizer):
         """
         Do training on batches of given size of the examples indexed by order.
         Return the total loss and output accuracy for each example (in index order).
         Accuracy for any example that is not used will be nan.
         """
-        total_loss = torch.tensor(0.0)
-        acc_each = torch.full((self.n_inputs,), np.nan)
-        wacc_each = torch.full((self.n_inputs,), np.nan)
-        wacc_loose_each = torch.full((self.n_inputs,), np.nan)
         if type(order) != torch.Tensor:
             order = torch.tensor(order, device='cpu', dtype=torch.long)
         
@@ -278,14 +296,6 @@ class DisjointDomainNet(nn.Module):
             loss = self.criterion(outputs, self.y[batch_inds])
             loss.backward()
             optimizer.step()
-
-            with torch.no_grad():
-                total_loss += loss
-                acc_each[batch_inds] = torch.mean(self.b_outputs_correct(outputs, batch_inds), dim=1)
-                wacc_each[batch_inds] = self.weighted_acc(outputs, batch_inds)
-                wacc_loose_each[batch_inds] = self.weighted_acc_loose(outputs, batch_inds)
-
-        return total_loss, acc_each, wacc_each, wacc_loose_each
 
     def prepare_holdout(self, holdout_item=True, holdout_context=True):
         """
@@ -439,8 +449,9 @@ class DisjointDomainNet(nn.Module):
 
         epochs = 0
         while epochs < max_epochs:
-            order = dd.choose_k(included_inds, len(included_inds))
-            wacc_each = self.train_epoch(order, batch_size, optimizer)[2]
+            order = util.permute(included_inds)
+            self.train_epoch(order, batch_size, optimizer)
+            wacc_each = self.evaluate_input_set(included_inds, mean=False)[2]
 
             acc_targets = torch.mean(wacc_each[targets])
             if acc_targets >= thresh:
@@ -513,8 +524,6 @@ class DisjointDomainNet(nn.Module):
         train_contexts = self.contexts[train_ctx_inds]
 
         etg_digits = len(str(p['test_max_epochs'])) + 2
-            
-        n_inputs_train = len(train_x_inds)
 
         snap_epochs, epoch_digits, snaps = self.prepare_snapshots(**p)
         n_snaps = len(snap_epochs)
@@ -523,7 +532,7 @@ class DisjointDomainNet(nn.Module):
         if p['param_snapshots']:
             params = {pname: torch.empty((n_snaps, *p.shape)) for pname, p in self.named_parameters()}
 
-        n_report = (p['num_epochs']-1) // p['report_freq'] + 1
+        n_report = (p['num_epochs']) // p['report_freq'] + 1
         n_etg = (n_report-1) // p['reports_per_test'] + 1
         reports = dict()
         reports['loss'] = np.zeros(n_report)
@@ -545,7 +554,7 @@ class DisjointDomainNet(nn.Module):
             reports['test_weighted_acc'] = np.zeros(n_report)
             reports['test_weighted_acc_loose'] = np.zeros(n_report)
 
-        for epoch in range(p['num_epochs']):
+        for epoch in range(p['num_epochs'] + 1):
 
             # collect snapshot
             if epoch in snap_epochs:
@@ -607,23 +616,14 @@ class DisjointDomainNet(nn.Module):
                         for pname, p in self.named_parameters():
                             params[pname][k_snap] = p
 
-            # do training
-            order = dd.choose_k(train_x_inds, n_inputs_train)
-            loss, acc_each, wacc_each, wacc_loose_each = self.train_epoch(order, p['batch_size'], optimizer)
-            if p['scheduler'] is not None:
-                p['scheduler'].step()
-
             # report progress
             if epoch % p['report_freq'] == 0:
                 k_report = epoch // p['report_freq']
-                
-                with torch.no_grad():
-                    mean_loss = loss.item() / n_inputs_train
-                    mean_acc = torch.nansum(acc_each).item() / n_inputs_train
-                    mean_wacc = torch.nansum(wacc_each).item() / n_inputs_train
-                    mean_wacc_loose = torch.nansum(wacc_loose_each).item() / n_inputs_train
 
-                report_str = (f'Epoch {epoch:{epoch_digits}d} end: ' +
+                # get current performance
+                mean_loss, mean_acc, mean_wacc, mean_wacc_loose = self.evaluate_input_set(train_x_inds)
+
+                report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
                               f'loss = {mean_loss:7.3f}, ' +
                               f'weighted acc = {mean_wacc:.3f}')
 
@@ -661,18 +661,20 @@ class DisjointDomainNet(nn.Module):
                         reports['etg_domain'][k_test] = domain_etg
                         
                 if p['do_combo_testing']:
-                    with torch.no_grad():
-                        outputs = self(self.x_item[test_x_inds], self.x_context[test_x_inds])
-                        test_acc = torch.mean(self.b_outputs_correct(outputs, test_x_inds)).item()
-                        test_wacc = torch.mean(self.weighted_acc(outputs, test_x_inds)).item()
-                        test_wacc_loose = torch.mean(self.weighted_acc_loose(outputs, test_x_inds)).item()
-                        
-                        report_str += f', test weighted acc = {test_wacc:.3f}'
-                        reports['test_accuracy'][k_report] = test_acc
-                        reports['test_weighted_acc'][k_report] = test_wacc
-                        reports['test_weighted_acc_loose'][k_report] = test_wacc_loose
+                    _, test_acc, test_wacc, test_wacc_loose = self.evaluate_input_set(test_x_inds)
+                    report_str += f', test weighted acc = {test_wacc:.3f}'
+                    reports['test_accuracy'][k_report] = test_acc
+                    reports['test_weighted_acc'][k_report] = test_wacc
+                    reports['test_weighted_acc_loose'][k_report] = test_wacc_loose
                                         
                 print(report_str)
+
+            # do training
+            if epoch < p['num_epochs']:
+                order = util.permute(train_x_inds)
+                self.train_epoch(order, p['batch_size'], optimizer)
+                if p['scheduler'] is not None:
+                    p['scheduler'].step()
 
         snaps_cpu = {stype: s.cpu().numpy() for stype, s in snaps.items()}
         ret_dict = {'snaps': snaps_cpu, 'reports': reports}

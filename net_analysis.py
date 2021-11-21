@@ -65,14 +65,14 @@ def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_indivi
             return {'snaps': mean_dists_snaps}
 
         
-def calc_mean_repr_dists(repr_snaps, metric='euclidean'):
+def calc_mean_repr_dists(repr_snaps, dist_metric='euclidean', **_extra):
     def dist_fn(snaps):
-        return distance.squareform(distance.pdist(snaps, metric=metric))
+        return distance.squareform(distance.pdist(snaps, metric=dist_metric))
     
     return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, calc_all=True)
 
 
-def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual=False):
+def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual_corr_mats=False, **_extra):
     if corr_type == 'pearson':
         def corr_fn(snaps):
             return np.corrcoef(snaps)
@@ -82,7 +82,7 @@ def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual=Fals
     else:
         raise ValueError(f'Unrecognized correlation type "{corr_type}"')
     
-    return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual)
+    return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual_corr_mats)
         
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',

@@ -6,12 +6,10 @@ from mpl_toolkits.mplot3d import Axes3D # noqa
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 from scipy.linalg import block_diag, svd, norm
-from scipy import stats
 from sklearn.manifold import MDS
 from sklearn.decomposition import NMF
 from statsmodels.regression.linear_model import OLS
 from patsy import dmatrices
-import torch
 
 import disjoint_domain as dd
 import util
@@ -43,11 +41,9 @@ def inv_sigmoid(x):
     return -np.log(1/x - 1)
 
 
-def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
-                     dist_metric='euclidean', calc_all_repr_dists=False, include_individual_rdms=False):
+def get_result_means(res_path, **result_mean_opts):
     
-    res = net_analysis.get_result_means(res_path, subsample_snaps, runs, dist_metric, calc_all_repr_dists,
-                                        include_individual_rdms, extra_keys=['ys'])
+    res = net_analysis.get_result_means(res_path, **result_mean_opts, extra_keys=['ys'])
     
     # expand any cluster info that was passed as a nullary function
     for possible_fn in ['cluster_info', 'last_domain_cluster_info']:
@@ -58,16 +54,16 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None),
     item_snaps = [res['snaps'][stype] for stype in ['item', 'item_hidden'] if stype in res['snaps']]
     if len(item_snaps) > 0:
         item_full_snaps = np.concatenate(item_snaps, axis=3)
-        res['repr_dists']['item_full'] = net_analysis.get_mean_repr_dists(item_full_snaps, metric=dist_metric,
-                                                                          calc_all=calc_all_repr_dists,
-                                                                          include_individual=include_individual_rdms)
+        res['repr_corr']['item_full'] = net_analysis.calc_mean_repr_corr(item_full_snaps, **result_mean_opts)
+        if 'compute_full_rdms' in result_mean_opts and result_mean_opts['compute_full_rdms']:
+            res['repr_dists']['item_full'] = net_analysis.calc_mean_repr_dists(item_full_snaps, **result_mean_opts)
     
     ctx_snaps = [res['snaps'][stype] for stype in ['context', 'context_hidden'] if stype in res['snaps']]
     if len(ctx_snaps) > 0:
         ctx_full_snaps = np.concatenate(ctx_snaps, axis=3)
-        res['repr_dists']['context_full'] = net_analysis.get_mean_repr_dists(ctx_full_snaps, metric=dist_metric,
-                                                                             calc_all=calc_all_repr_dists,
-                                                                             include_individual=include_individual_rdms)
+        res['repr_corr']['context_full'] = net_analysis.calc_mean_repr_corr(ctx_full_snaps, **result_mean_opts)
+        if 'compute_full_rdms' in result_mean_opts and result_mean_opts['compute_full_rdms']:
+            res['repr_dists']['context_full'] = net_analysis.calc_mean_repr_dists(ctx_full_snaps, **result_mean_opts)
     return res
     
     
@@ -129,13 +125,13 @@ def plot_matrix_with_input_labels(ax, mat, input_type, res=None, **plot_matrix_a
     return util.plot_matrix_with_labels(ax, mat, labels, **plot_matrix_args)
 
 
-def plot_rsa(ax, res, snap_type, snap_ind, **kwargs):
+def plot_repr_corr(ax, res, snap_type, snap_ind, **kwargs):
     """
     Plot an RSA matrix for the representation of items or contexts at a particular epoch
     If 'rsa_mat' is provided, overrides the matrix to plot.
     """
     input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
-    return net_analysis.plot_rsa(ax, res, snap_type, snap_ind, input_names, **kwargs)
+    return net_analysis.plot_repr_corr(ax, res, snap_type, snap_ind, input_names, **kwargs)
 
 
 def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr', center=False):

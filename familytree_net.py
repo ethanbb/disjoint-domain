@@ -274,11 +274,12 @@ class FamilyTreeNet(nn.Module):
         epoch_digits = len(str(snap_epochs[-1]))
         n_snaps = len(snap_epochs)
         
-        snaps = {}
-        snaps['person1_repr'] = torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan)
-        snaps['person1_hidden'] = torch.full((n_snaps, self.person1_units, self.hidden_units), np.nan)
-        snaps['relation_repr'] = torch.full((n_snaps, self.rel_units, self.rel_repr_units), np.nan)
-        snaps['relation_hidden'] = torch.full((n_snaps, self.rel_units, self.hidden_units), np.nan)
+        snaps = {
+            'person1_repr': torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan),
+            'person1_hidden': torch.full((n_snaps, self.person1_units, self.hidden_units), np.nan),
+            'relation_repr': torch.full((n_snaps, self.rel_units, self.rel_repr_units), np.nan),
+            'relation_hidden': torch.full((n_snaps, self.rel_units, self.hidden_units), np.nan)
+        }
         
         return snap_epochs, epoch_digits, snaps
     
@@ -299,7 +300,7 @@ class FamilyTreeNet(nn.Module):
         if isinstance(num_epochs, tuple):
             n_stages = len(num_epochs)
         else:
-            n_stages =  1
+            n_stages = 1
             num_epochs = (num_epochs,)
 
         lr = train_params['lr']
@@ -333,8 +334,7 @@ class FamilyTreeNet(nn.Module):
         
         # Prepare snapshots
         snap_epochs, epoch_digits, snaps = self.prepare_snapshots(**train_params)
-        n_snaps = len(snap_epochs)
-        
+
         total_epochs = sum(num_epochs)
         change_epochs = list(np.cumsum(num_epochs))
         epoch_digits = len(str(total_epochs-1))

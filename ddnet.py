@@ -1,7 +1,6 @@
 from datetime import datetime as dt
 import torch
 import torch.nn as nn
-from torchnlp.nn.weight_drop import WeightDropLinear
 import numpy as np
 from copy import deepcopy
 
@@ -14,7 +13,7 @@ net_defaults = {
     'use_item_repr': True, 'item_repr_units': 16, 'merged_repr': False,
     'use_ctx': True, 'share_ctx': False, 'use_ctx_repr': True, 'ctx_repr_units': 16,
     'hidden_units': 32,
-    'share_attr_units_in_domain': False, 'repeat_attrs_over_domains': False, 'attr_weightdrop': 0.,
+    'share_attr_units_in_domain': False, 'repeat_attrs_over_domains': False,
     'cluster_info': '4-2-2', 'last_domain_cluster_info': None,
     'param_init_type': 'normal', 'param_init_scale': 0.01,
     'fix_biases': False, 'fixed_bias': -2,
@@ -62,7 +61,6 @@ class DisjointDomainNet(nn.Module):
     - fix_biases: If True, don't use trainable biases
     - fixed_bias: Only if fix_biases is True, use this value as the fixed bias (set to 0 for no biases)
     - repeat_attrs_over_domains: Whether to reuse the exact same ground truth attributes, shifted, for each domain
-    - attr_weightdrop: If nonzero (but <= 1), drop hidden-to-attr weights with this probability
     - activation_fn: Function to use as nonlinearity for all layers
     - output_activation: If None, use same as activation_fn
     - loss_fn: Type of loss function to use (will be initialized with reduction='sum')
@@ -182,9 +180,7 @@ class DisjointDomainNet(nn.Module):
             self.ctx_rep_bias = torch.zeros((self.ctx_repr_units,), device=self.device)
         
         self.rep_to_hidden, self.hidden_bias = make_layer(self.repr_units, self.hidden_units)
-        self.hidden_to_attr = WeightDropLinear(self.hidden_units, self.n_attributes, bias=False,
-                                               weight_dropout=self.attr_weightdrop).to(self.device)
-        self.attr_bias = make_bias(self.n_attributes)
+        self.hidden_to_attr, self.attr_bias = make_layer(self.hidden_units, self.n_attributes)
 
         # make weights start small
         if self.param_init_type != 'default':
@@ -219,9 +215,9 @@ class DisjointDomainNet(nn.Module):
 
     def calc_hidden_preact(self, item=None, context=None):
         if item is None:
-            item = self.dummy_item.repeat((context.shape[0] if context is not None else 1), 1)
+            item = self.dummy_item.expand((context.shape[0] if context is not None else 1), 1)
         if context is None:
-            context = self.dummy_ctx.repeat(item.shape[0], 1)
+            context = self.dummy_ctx.expand(item.shape[0], 1)
             
         irep = self.item_to_rep(item) + self.item_rep_bias
         crep = self.ctx_to_rep(context) + self.ctx_rep_bias
@@ -575,7 +571,8 @@ class DisjointDomainNet(nn.Module):
                         snaps['context_hidden'][k_snap][train_ctx_inds] = self.act_fn(hidden_preact)
 
                         # versions that average over other input
-                        def get_matching_input_mats(this_input, this_x_mat, other_x_mat):
+                        def get_matching_input_mats(this_input: torch.Tensor,
+                                                    this_x_mat: torch.Tensor, other_x_mat: torch.Tensor):
                             x_inds = np.flatnonzero(this_x_mat.eq(this_input).all(axis=1).cpu())
                             x_inds = np.intersect1d(x_inds, train_x_inds)
                             other_inputs = other_x_mat[x_inds]

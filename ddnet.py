@@ -96,6 +96,12 @@ class DisjointDomainNet(nn.Module):
         net_params = {**net_defaults, **net_params}
         for key, val in net_params.items():
             setattr(self, key, val)
+            
+        self.device, self.torchfp, _ = util.init_torch(self.device, self.torchfp)
+        if self.device.type == 'cuda':
+            print('Using CUDA')
+        else:
+            print('Using CPU')
 
         self.use_ctx_repr = self.use_ctx and self.use_ctx_repr
         if self.merged_repr:
@@ -128,12 +134,6 @@ class DisjointDomainNet(nn.Module):
             self.rng_seed = torch.seed()
         else:
             torch.manual_seed(self.rng_seed)
-
-        self.device, self.torchfp, _ = util.init_torch(self.device, self.torchfp)
-        if self.device.type == 'cuda':
-            print('Using CUDA')
-        else:
-            print('Using CPU')
 
         if not self.use_item_repr:
             self.item_repr_units = self.n_items

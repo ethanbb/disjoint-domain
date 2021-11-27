@@ -86,7 +86,7 @@ def calc_iomat_snaps(res):
             iomat_snaps['hidden_preact'] = res['snaps']['item_hidden_mean_preact'] / res['snaps']['item_hidden_mean_preact'].shape[2]
 
     elif 'use_ctx' in res['net_params'] and not res['net_params']['use_ctx']:
-        iomat_snaps['hidden'] = res['snaps']['item_hidden'] / res['snaps']['item_hidden'].shape[2]\
+        iomat_snaps['hidden'] = res['snaps']['item_hidden'] / res['snaps']['item_hidden'].shape[2]
     
     res['iomat_snaps'] = iomat_snaps
     

@@ -167,12 +167,13 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
     return attrs
 
 
-def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                                intragroup_dists=None, **_extra):
+def _make_ring_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                         intragroup_dists=None, rotating_overlap=0, **_extra):
     """
-    Make attribute vectors that are all equidistant from each other with Hamming distance `dist`. 
-    attrs_per_context must be at least attrs_set_per_item + (dist/2) * (ITEMS_PER_DOMAIN-1)
-    (by default, at least 60). Also, dist must be even.
+    Make attribute vectors by activating a rotating set within a subset of attribute units
+    (ITEMS_PER_DOMAIN * intragroup_dists[0]/2). Neighboring items (with wraparound) overlap
+    by rotating_overlap within this subset, plus potentially by a fixed set of active units outside it.
+    If rotating_overlap is 0, all items are equidistant.
     """
     if intragroup_dists is None:
         dist = 10
@@ -181,26 +182,27 @@ def _make_equidistant_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per
 
     if dist % 2 != 0:
         raise ValueError('dist must be even')
-    half_dist = dist // 2
-
-    if attrs_per_context < attrs_set_per_item + half_dist * (ITEMS_PER_DOMAIN - 1):
-        raise ValueError(f'Need more attrs to get equidistant vecs with distance {dist}')
-
-    n_rot = half_dist * ITEMS_PER_DOMAIN  # portion of vector that rotates for each item
-    n_fixed_set = attrs_set_per_item - half_dist
-
+    step = dist // 2
+    
+    rotating_section_size = step * ITEMS_PER_DOMAIN
+    rotating_block_size = step + rotating_overlap
+    assert rotating_block_size <= attrs_set_per_item, 'Not enough set attributes for desired step and overlap'
+    fixed_section_size = attrs_set_per_item - rotating_block_size
+    zero_section_size = attrs_per_context - rotating_section_size - fixed_section_size
+    assert zero_section_size >= 0, 'Not enough total attributes for desired set # and rotation step and overlap'
+    
     attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-
+    
     for attr_mat in attrs:
         # pick fixed set and rotating indices
-        fixed_set_and_rot_inds = choose_k_inds(attrs_per_context, n_fixed_set + n_rot)
-        fixed_set_inds, rot_inds = fixed_set_and_rot_inds.split([n_fixed_set, n_rot])
-        rot_inds_each = rot_inds.split(half_dist)
+        fixed_set_and_rot_inds = util.choose_k_inds(attrs_per_context, fixed_section_size + rotating_section_size)
+        fixed_set_inds, rot_inds = fixed_set_and_rot_inds.split([fixed_section_size, rotating_section_size])
 
         # set fixed indices for all items and rotating indices for each individually
         attr_mat[:, fixed_set_inds] = 1
-        for attr_vec, inds in zip(attr_mat, rot_inds_each):
-            attr_vec[inds] = 1
+        for i, attr_vec in enumerate(attr_mat):
+            rel_inds = (np.arange(rotating_block_size) + (i * step)) % rotating_section_size
+            attr_vec[rot_inds[rel_inds]] = 1
 
     return attrs
 
@@ -406,7 +408,7 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
         try:
             attr_vec_fn = {
-                1: _make_equidistant_attr_vecs,
+                1: _make_ring_attr_vecs,
                 2: _make_2_group_attr_vecs,
                 3: _make_3_group_attr_vecs
             }[n_clusts]

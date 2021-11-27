@@ -136,7 +136,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
             snap_freq_scale = 'lin'
         extra['snap_epochs'] = util.calc_snap_epochs(train_params['snap_freq'], total_epochs, snap_freq_scale)[::subsample_snaps]
 
-    report_epochs = np.arange(0, total_epochs + 1, train_params['report_freq'])
+    report_epochs = np.arange(len(report_means['loss'])) * train_params['report_freq']
+#     report_epochs = np.arange(0, total_epochs + 1, train_params['report_freq'])
     
     if 'reports_per_test' in train_params:
         extra['etg_epochs'] = report_epochs[::train_params['reports_per_test']]

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from scipy import stats
+from scipy.spatial import distance
 import matplotlib.pyplot as plt
 from mpl_toolkits import axes_grid1
 import seaborn as sns
@@ -172,3 +173,10 @@ def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
         ticklabel.set_fontsize(tick_fontsize)
     
     return image
+
+
+def get_attribute_rdm(attrs, metric='cityblock'):
+    if isinstance(attrs, np.ndarray):
+        attrs = [attrs]
+    mean_dist = np.nanmean(np.stack([distance.pdist(a, metric=metric) for a in attrs]), axis=0)
+    return distance.squareform(mean_dist)

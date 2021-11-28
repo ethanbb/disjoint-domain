@@ -184,6 +184,21 @@ class FamilyTree:
         person2_mat = cat_fn(person2_mats, 0)
         
         return person1_mat, rel_mat, person2_mat
+    
+    def get_person2_mats_by_rel(self, zeros_fn=np.zeros, nan_if_none=False):
+        """Get a list of person 2 matrices, one for each relationship, with 1 row per person 1"""
+        n_rels = len(self.members[0].relationship_fns)
+        mats = [zeros_fn((self.size, self.size)) for _ in range(n_rels)]
+        
+        for rel_ind in range(n_rels):
+            for subj_ind, subject in enumerate(self.members):
+                relatives = subject.relationship_fns[rel_ind]()
+                if len(relatives) == 0 and nan_if_none:
+                    mats[rel_ind][subj_ind, :] = np.nan
+                else:
+                    for relative in relatives:
+                        mats[rel_ind][subj_ind, self.member_index[relative]] = 1   
+        return mats
 
 
 def get_hinton_tree(italian=False):
@@ -216,3 +231,39 @@ def get_hinton_tree(italian=False):
     couples = [chrispen, andchris, margart, vicjames, jenncharles]
 
     return FamilyTree(members, couples)
+
+
+def get_french_tree():
+    """Make another family tree that is not isomorphic to the Hinton trees"""
+    albert = FamilyMember('Albert', 'm')
+    alice = FamilyMember('Alice', 'f')
+    alal = Couple(alice, albert)
+    
+    cedric = FamilyMember('Cedric', 'm', parents=alal)
+    celine = FamilyMember('Celine', 'f', parents=alal)
+    edouard = FamilyMember('Edouard', 'm', parents=alal)
+    sarah = FamilyMember('Sarah', 'f')
+    sared = Couple(sarah, edouard)
+    
+    marie = FamilyMember('Marie', 'f', parents=sared)
+    louise = FamilyMember('Louise', 'f', parents=sared)
+    robert = FamilyMember('Robert', 'm', parents=sared)
+    jean = FamilyMember('Jean', 'm')
+    marjean = Couple(marie, jean)
+    juliette = FamilyMember('Juliette', 'f')
+    julirob = Couple(juliette, robert)
+    rene = FamilyMember('Rene', 'm', parents=julirob)
+    
+    members = [albert, alice, cedric, celine, edouard, sarah,
+               marie, louise, robert, jean, juliette, rene]
+    couples = [alal, sared, marjean, julirob]
+    
+    return FamilyTree(members, couples)
+    
+
+def get_tree(name='english'):
+    return {
+        'english': lambda: get_hinton_tree(italian=False),
+        'italian': lambda: get_hinton_tree(italian=True),
+        'french': get_french_tree
+    }[name]()

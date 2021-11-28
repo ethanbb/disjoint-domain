@@ -282,11 +282,7 @@ class DisjointDomainNet(nn.Module):
             return loss, acc, wacc, wacc_loose
 
     def train_epoch(self, order, batch_size, optimizer):
-        """
-        Do training on batches of given size of the examples indexed by order.
-        Return the total loss and output accuracy for each example (in index order).
-        Accuracy for any example that is not used will be nan.
-        """
+        """Do training on batches of given size of the examples indexed by order."""
         if type(order) != torch.Tensor:
             order = torch.tensor(order, device='cpu', dtype=torch.long)
         

@@ -620,12 +620,10 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
 
 
 def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                           cluster_info='4-2-2', metric='euclidean'):
+                           cluster_info='4-2-2', metric='cityblock'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
-
     attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info)
-    mean_dist = np.mean(np.stack([distance.pdist(a, metric=metric) for a in attrs]), axis=0)
-    return distance.squareform(mean_dist)
+    return util.get_attribute_rdm(attrs, metric=metric)
 
 
 def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,

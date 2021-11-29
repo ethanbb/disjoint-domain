@@ -259,27 +259,16 @@ class DisjointDomainNet(nn.Module):
         outputs_binary = (outputs > 0.5).to(self.torchfp)
         return self.weighted_acc(outputs_binary, batch_inds)
 
-    def evaluate_input_set(self, input_inds, mean=True):
+    def evaluate_input_set(self, input_inds):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs (e.g. train or test)"""
-        acc_each = torch.full((self.n_inputs,), np.nan)
-        wacc_each = acc_each.clone()
-        wacc_loose_each = acc_each.clone()
-
         with torch.no_grad():
             outputs = self(self.x_item[input_inds], self.x_context[input_inds])
-            loss = self.criterion(outputs, self.y[input_inds])
-            acc_each[input_inds] = torch.mean(self.b_outputs_correct(outputs, input_inds), dim=1)
-            wacc_each[input_inds] = self.weighted_acc(outputs, input_inds)
-            wacc_loose_each[input_inds] = self.weighted_acc_loose(outputs, input_inds)
+            loss = self.criterion(outputs, self.y[input_inds]) / len(input_inds)
+            acc = torch.mean(self.b_outputs_correct(outputs, input_inds)).item()
+            wacc = torch.mean(self.weighted_acc(outputs, input_inds)).item()
+            wacc_loose = torch.mean(self.weighted_acc_loose(outputs, input_inds)).item()
 
-        if not mean:
-            return loss, acc_each, wacc_each, wacc_loose_each
-        else:
-            loss /= len(input_inds)
-            acc = acc_each.nanmean().item()
-            wacc = wacc_each.nanmean().item()
-            wacc_loose = wacc_loose_each.nanmean().item()
-            return loss, acc, wacc, wacc_loose
+        return loss, acc, wacc, wacc_loose
 
     def train_epoch(self, order, batch_size, optimizer):
         """Do training on batches of given size of the examples indexed by order."""
@@ -447,10 +436,9 @@ class DisjointDomainNet(nn.Module):
         while epochs < max_epochs:
             order = util.permute(included_inds)
             self.train_epoch(order, batch_size, optimizer)
-            wacc_each = self.evaluate_input_set(included_inds, mean=False)[2]
+            mean_target_wacc = self.evaluate_input_set(targets)[2]
 
-            acc_targets = torch.mean(wacc_each[targets])
-            if acc_targets >= thresh:
+            if mean_target_wacc >= thresh:
                 break
 
             epochs += 1

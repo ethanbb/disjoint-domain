@@ -44,8 +44,8 @@ train_defaults = {
     'n_holdout': 4,
     'do_tree_holdout': False,
     'reports_per_test': 4,
-    'test_thresh': 0.97,
-    'test_max_epochs': 10000
+    'test_thresh': 0.85,
+    'test_max_epochs': 15000
 }
 
 
@@ -196,30 +196,19 @@ class FamilyTreeNet(nn.Module):
         b_correct = self.b_outputs_correct(outputs, batch_inds, threshold=threshold)
         return torch.sum(weights * b_correct.to(self.torchfp), dim=1)
     
-    def evaluate_input_set(self, input_inds, threshold=0.2, mean=True):
+    def evaluate_input_set(self, input_inds, threshold=0.2, output_stats_units=slice(None)):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs"""
-        acc_each = torch.full((self.n_inputs,), np.nan)
-        wacc_each = acc_each.clone()
-        perfect_each = acc_each.clone()
-        
         with torch.no_grad():
             outputs = self(self.person1_mat[input_inds], self.rel_mat[input_inds])
-            loss = self.criterion(outputs, self.person2_train_target[input_inds])
-            mean_output = torch.mean(outputs)
-            std_output = torch.mean(torch.std(outputs, dim=0))
+            loss = self.criterion(outputs, self.person2_train_target[input_inds]) / len(input_inds)
+            mean_output = torch.mean(outputs[:, output_stats_units])
+            std_output = torch.mean(torch.std(outputs[:, output_stats_units], dim=0))
             outputs_correct = self.b_outputs_correct(outputs, input_inds, threshold=threshold)
-            acc_each[input_inds] = torch.mean(outputs_correct.to(self.torchfp), dim=1)
-            wacc_each[input_inds] = self.weighted_acc(outputs, input_inds, threshold=threshold)
-            perfect_each[input_inds] = torch.all(outputs_correct, dim=1).to(self.torchfp)
-            
-        if not mean:
-            return loss, acc_each, wacc_each, perfect_each, mean_output, std_output
-        else:
-            loss /= len(input_inds)
-            acc = acc_each.nanmean().item()
-            wacc = wacc_each.nanmean().item()
-            perfect = perfect_each.nanmean().item()
-            return loss, acc, wacc, perfect, mean_output, std_output
+            acc = torch.mean(outputs_correct.to(self.torchfp)).item()
+            wacc = torch.mean(self.weighted_acc(outputs, input_inds, threshold=threshold)).item()
+            perfect = torch.mean(torch.all(outputs_correct, dim=1).to(self.torchfp)).item()
+
+        return loss, acc, wacc, perfect, mean_output, std_output
             
     def train_epoch(self, order, optimizer, batch_size=0):
         """Do training on batches of given size of the examples indexed by order."""
@@ -246,14 +235,13 @@ class FamilyTreeNet(nn.Module):
         
         train_p1_inds = np.arange(self.person1_units - last_tree_n_people)
         if self.share_rel_units:
-            train_rel_inds = np.arange(self.rel_units) # use all, they're shared
+            train_rel_inds = np.arange(self.rel_units)  # use all, they're shared
         else:
             rel_is_last_tree = torch.any(self.rel_mat[-len(test_inds):, :], dim=0)
             train_rel_inds = torch.squeeze(torch.nonzero(~rel_is_last_tree)).cpu().numpy()
         
-        return train_p1_inds, train_rel_inds, train_inds, test_inds
+        return train_p1_inds, train_rel_inds, train_inds.cpu().numpy(), test_inds.cpu().numpy()
 
-    
     def prepare_holdout(self, n_holdout):
         """
         Pick n_holdout person1/relationship combinations to test on, in the English tree.
@@ -314,7 +302,8 @@ class FamilyTreeNet(nn.Module):
         
         return snap_epochs, epoch_digits, snaps
     
-    def generalize_test(self, batch_size, optimizer, included_inds, targets, max_epochs, thresh):
+    def generalize_test(self, batch_size, included_inds, targets, max_epochs, thresh,
+                        change_epochs, optim_args):
         """
         See how long it takes the network to reach accuracy threshold on target inputs,
         when training on items specified by included_inds. Then restore the parameters.
@@ -323,23 +312,26 @@ class FamilyTreeNet(nn.Module):
         """
         # Save original state of network to restore later
         net_state_dict = deepcopy(self.state_dict())
-        optim_state_dict = deepcopy(optimizer.state_dict())
+        optimizer = torch.optim.SGD(self.parameters(), **optim_args[0])
 
         epochs = 0
         while epochs < max_epochs:
+            if epochs in change_epochs:
+                k_change = change_epochs.index(epochs)
+                for key, val in optim_args[k_change + 1].items():
+                    optimizer.param_groups[0][key] = val
+            
             order = util.permute(included_inds)
             self.train_epoch(order, optimizer, batch_size)
-            wacc_each = self.evaluate_input_set(included_inds, mean=False)[2]
+            perfect = self.evaluate_input_set(targets, threshold=0.5)[3]
 
-            acc_targets = torch.mean(wacc_each[targets])
-            if acc_targets >= thresh:
+            if perfect >= thresh:
                 break
 
             epochs += 1
 
         # Restore old state of network
         self.load_state_dict(net_state_dict)
-        optimizer.load_state_dict(optim_state_dict)
 
         etg_string = '= ' + str(epochs + 1) if epochs < max_epochs else '> ' + str(max_epochs)
         return epochs, etg_string
@@ -386,8 +378,13 @@ class FamilyTreeNet(nn.Module):
         #  (independent of the learning rate). To convert to what pytorch means by weight decay, have to 
         #  divide by the learning rate.
         wd_torch = tuple(wd / rate for wd, rate in zip(weight_decay, lr))
+        
+        train_optim_args = [{'lr': this_lr, 'momentum': this_mm, 'weight_decay': this_wd}
+                            for this_lr, this_mm, this_wd in zip(lr, momentum, wd_torch)]
 
-        optimizer = torch.optim.SGD(self.parameters(), lr=lr[0], momentum=momentum[0], weight_decay=wd_torch[0])
+        test_optim_args = [{**optim_args, 'weight_decay': 0} for optim_args in train_optim_args]
+
+        optimizer = torch.optim.SGD(self.parameters(), **train_optim_args[0])
         
         # Choose the hold-out people/relationships from the English tree
         train_p1_inds = np.arange(self.person1_units)
@@ -397,6 +394,9 @@ class FamilyTreeNet(nn.Module):
             train_inds, holdout_inds = self.prepare_holdout(train_params['n_holdout'])
         elif train_params['do_tree_holdout']:
             train_p1_inds, train_rel_inds, train_inds, holdout_inds = self.prepare_tree_holdout()
+        else:
+            train_inds = np.arange(self.n_inputs)
+            holdout_inds = np.array([])
                     
         # Prepare snapshots
         snap_epochs, epoch_digits, snaps = self.prepare_snapshots(**train_params)
@@ -405,16 +405,16 @@ class FamilyTreeNet(nn.Module):
         change_epochs = list(np.cumsum(num_epochs))[:-1]
         epoch_digits = len(str(total_epochs-1))
         etg_digits = len(str(train_params['test_max_epochs'])) + 2
-        n_report = (total_epochs) // train_params['report_freq'] + 1
+        n_report = total_epochs // train_params['report_freq'] + 1
         n_etg = (n_report - 1) // train_params['reports_per_test'] + 1
         reports = {rtype: np.zeros(n_report)
                    for rtype in ['loss', 'mean_output', 'std_output',
                                  'accuracy', 'weighted_acc', 'frac_perfect']}
         
         if train_params['do_combo_testing']:
-            report = {**reports, **{rtype: np.zeros(n_report) for rtype in [
-                'test_accuracy', 'test_weighted_acc', 'test_frac_perfect']}}
-            
+            for rtype in ['test_accuracy', 'test_weighted_acc', 'test_frac_perfect']:
+                reports[rtype] = np.zeros(n_report)
+
         if train_params['do_tree_holdout']:
             reports['new_tree_etg'] = np.zeros(n_etg, dtype=int)
         
@@ -422,9 +422,8 @@ class FamilyTreeNet(nn.Module):
             if epoch in change_epochs:
                 # Move to new stage of learning
                 k_change = change_epochs.index(epoch)
-                optimizer.param_groups[0]['lr'] = lr[k_change + 1]
-                optimizer.param_groups[0]['momentum'] = momentum[k_change + 1]
-                optimizer.param_groups[0]['weight_decay'] = wd_torch[k_change + 1]
+                for key, val in train_optim_args[k_change + 1].items():
+                    optimizer.param_groups[0][key] = val
                 
             if epoch in snap_epochs:
                 # collect snapshots
@@ -455,7 +454,7 @@ class FamilyTreeNet(nn.Module):
                 k_report = epoch // train_params['report_freq']
                 
                 # get current performance
-                mean_loss, mean_acc, mean_wacc, frac_perf, mean_out, std_out = self.evaluate_input_set(train_inds)
+                mean_loss, mean_acc, mean_wacc, frac_perf, mean_out, std_out = self.evaluate_input_set(train_inds) #, output_stats_units=train_p1_inds)
                 
                 reports['loss'][k_report] = mean_loss
                 reports['accuracy'][k_report] = mean_acc
@@ -463,19 +462,22 @@ class FamilyTreeNet(nn.Module):
                 reports['frac_perfect'][k_report] = frac_perf
                 reports['mean_output'][k_report] = mean_out
                 reports['std_output'][k_report] = std_out
+
+                # mean_out_test = self.evaluate_input_set(holdout_inds, output_stats_units=np.setdiff1d(range(self.person1_units), train_p1_inds))[4]
                     
-                report_str = (f'Epoch {epoch:{epoch_digits}d} end: ' +
-                              f'loss = {mean_loss:7.3f}, ' +
-                              # f'accuracy = {mean_acc:.3f}, ' +
-                              f'weighted acc = {mean_wacc:.3f}, ' +
-                              f'{frac_perf*100:3.0f}% perfect (train)')
+                report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
+                              f'loss = {mean_loss:7.3f}' +
+                              # f', accuracy = {mean_acc:.3f}' +
+                              f', weighted acc = {mean_wacc:.3f}' +
+                              f', {frac_perf*100:3.0f}% perfect (train)')
     
                 # testing
                 if train_params['do_tree_holdout'] and k_report % train_params['reports_per_test'] == 0:
                     k_ho = k_report // train_params['reports_per_test']
                     etg, etg_string = self.generalize_test(
-                        train_params['batch_size'], optimizer, np.arange(self.n_inputs),
-                        holdout_inds, train_params['test_max_epochs'], train_params['test_thresh']
+                        train_params['batch_size'], np.arange(self.n_inputs),
+                        holdout_inds, train_params['test_max_epochs'], train_params['test_thresh'],
+                        change_epochs, test_optim_args
                     )
                     reports['new_tree_etg'][k_ho] = etg
                     report_str += f', epochs for new tree {etg_string:>{etg_digits}}'

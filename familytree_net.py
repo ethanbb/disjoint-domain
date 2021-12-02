@@ -294,6 +294,7 @@ class FamilyTreeNet(nn.Module):
         n_snaps = len(snap_epochs)
         
         snaps = {
+            'person1_repr_preact': torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan),
             'person1_repr': torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan),
             'person1_hidden': torch.full((n_snaps, self.person1_units, self.hidden_units), np.nan),
             'relation_repr': torch.full((n_snaps, self.rel_units, self.rel_repr_units), np.nan),
@@ -435,10 +436,12 @@ class FamilyTreeNet(nn.Module):
                     people_dummy = torch.zeros((len(train_rel_inds), self.person1_units), device=self.device)
                     rels_dummy = torch.zeros((len(train_p1_inds), self.rel_units), device=self.device)
                     
-                    p1_repr_snap = self.act_fn(self.person1_to_repr(people_input))
+                    p1_repr_preact_snap = self.person1_to_repr(people_input)
+                    p1_repr_snap = self.act_fn(p1_repr_preact_snap)
                     dummy_rel_repr = self.act_fn(self.rel_to_repr(rels_dummy))
                     combined_repr = torch.cat((p1_repr_snap, dummy_rel_repr), dim=1)
                     p1_hidden_snap = self.act_fn(self.repr_to_hidden(combined_repr))
+                    snaps['person1_repr_preact'][k_snap][train_p1_inds] = p1_repr_preact_snap
                     snaps['person1_repr'][k_snap][train_p1_inds] = p1_repr_snap
                     snaps['person1_hidden'][k_snap][train_p1_inds] = p1_hidden_snap
                     

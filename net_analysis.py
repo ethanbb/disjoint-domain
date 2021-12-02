@@ -156,7 +156,7 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
 
 def plot_report(ax, res, report_type, with_ci=True, label=None, title=None, **plot_params):
     """Make a standard plot of mean loss, accuracy, etc. over training"""
-    xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
+    xaxis = res['etg_epochs'] if 'etg' in report_type else res['report_epochs']
     ax.plot(xaxis, res['reports'][report_type], label=label, **plot_params)
     if with_ci:
         ax.fill_between(xaxis, *res['report_cis'][report_type], alpha=0.3)

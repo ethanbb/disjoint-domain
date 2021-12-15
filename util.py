@@ -80,8 +80,11 @@ def get_mean_and_ci(series_set):
     return mean, interval
 
 
-def calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale='lin'):
+def calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale='lin', include_final_eval=True, **_extra):
     """Given the possibility of taking snapshots on a log scale, get the actual snapshot epochs"""
+    if include_final_eval:
+        num_epochs += 1
+
     if snap_freq_scale == 'log':
         snap_epochs = np.arange(0, np.log2(num_epochs), snap_freq)
         snap_epochs = np.exp2(snap_epochs)
@@ -180,3 +183,41 @@ def get_attribute_rdm(attrs, metric='cityblock'):
         attrs = [attrs]
     mean_dist = np.nanmean(np.stack([distance.pdist(a, metric=metric) for a in attrs]), axis=0)
     return distance.squareform(mean_dist)
+
+
+def inv_sigmoid(x):
+    return -np.log(1/x - 1)
+
+# -- stupid equality stuff -- #
+
+
+class SaneEqNdarray:
+    def __init__(self, wrapped_array: np.ndarray):
+        self.array = wrapped_array
+    
+    def __eq__(self, other):
+        return np.array_equal(self.array, other)
+
+
+class SaneEqTensor:
+    def __init__(self, wrapped_tensor: torch.Tensor):
+        self.tensor = wrapped_tensor
+        
+    def __eq__(self, other):
+        return self.tensor.equal(other)
+
+
+def convert_to_sane_eq_type(anything):
+    if isinstance(anything, dict):
+        return {key: convert_to_sane_eq_type(val) for key, val in anything.items()}
+    elif isinstance(anything, np.ndarray):
+        return SaneEqNdarray(anything)
+    elif isinstance(anything, torch.Tensor):
+        return SaneEqTensor(anything)
+    elif isinstance(anything, str):
+        return anything
+    else:
+        try:
+            return [convert_to_sane_eq_type(item) for item in anything]
+        except TypeError:
+            return anything

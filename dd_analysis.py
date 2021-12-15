@@ -11,6 +11,7 @@ from sklearn.decomposition import NMF
 from statsmodels.regression.linear_model import OLS
 from patsy import dmatrices
 
+import ddnet
 import disjoint_domain as dd
 import util
 import net_analysis
@@ -37,16 +38,12 @@ add_colorbar = util.add_colorbar
 imshow_centered_bipolar = util.imshow_centered_bipolar
 
 
-def inv_sigmoid(x):
-    return -np.log(1/x - 1)
-
-
 def get_result_means(res_path, **result_mean_opts):
     
     res = net_analysis.get_result_means(res_path, **result_mean_opts, extra_keys=['ys'])
     
     # expand any cluster info that was passed as a nullary function
-    for possible_fn in ['cluster_info', 'last_domain_cluster_info']:
+    for possible_fn in ddnet.callable_net_params:
         if possible_fn in res['net_params'] and callable(res['net_params'][possible_fn]):
             res['net_params'][possible_fn] = res['net_params'][possible_fn]()
             
@@ -64,32 +61,8 @@ def get_result_means(res_path, **result_mean_opts):
         res['repr_corr']['context_full'] = net_analysis.calc_mean_repr_corr(ctx_full_snaps, **result_mean_opts)
         if 'compute_full_rdms' in result_mean_opts and result_mean_opts['compute_full_rdms']:
             res['repr_dists']['context_full'] = net_analysis.calc_mean_repr_dists(ctx_full_snaps, **result_mean_opts)
-    return res
-    
-    
-def calc_iomat_snaps(res):
-    """Add dict of individual snapshots that are normalized as empirical (partial) I/O matrices to res"""
-    iomat_snaps = dict()
-    if 'attr' in res['snaps']:
-        iomat_snaps['attr'] = res['snaps']['attr']
-    if 'attr_preact' in res['snaps']:
-        iomat_snaps['attr_preact'] = res['snaps']['attr_preact']
-    
-    if 'use_item_repr' not in res['net_params'] or res['net_params']['use_item_repr']:
-        iomat_snaps['repr'] = res['snaps']['item'] / res['snaps']['item'].shape[2]
-        if 'item_preact' in res['snaps']:
-            iomat_snaps['repr_preact'] = res['snaps']['item_preact'] / res['snaps']['item_preact'].shape[2]
-        
-    if 'item_hidden_mean' in res['snaps']:
-        iomat_snaps['hidden'] = res['snaps']['item_hidden_mean'] / res['snaps']['item_hidden_mean'].shape[2]
-        if 'item_hidden_mean_preact' in res['snaps']:
-            iomat_snaps['hidden_preact'] = res['snaps']['item_hidden_mean_preact'] / res['snaps']['item_hidden_mean_preact'].shape[2]
+    return res    
 
-    elif 'use_ctx' in res['net_params'] and not res['net_params']['use_ctx']:
-        iomat_snaps['hidden'] = res['snaps']['item_hidden'] / res['snaps']['item_hidden'].shape[2]
-    
-    res['iomat_snaps'] = iomat_snaps
-    
 
 def plot_report(ax, res, report_type, **kwargs):
     if 'title' not in kwargs:
@@ -134,17 +107,14 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, **kwargs):
     return net_analysis.plot_repr_corr(ax, res, snap_type, snap_ind, input_names, **kwargs)
 
 
-def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr', center=False):
+def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='item_attr', center=False):
     """
     Get SVD loading onto items of the empirical I/O matrix ('attr' snapshot) from a particular run.
     weighted controls whether to weight each mode by its singular value.
     n_modes allows returning only the first n modes (if not None)
     Output is an n_items x n_modes matrix.
     """
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
-
-    mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
+    mat = res['snaps'][layer][run_ind, snap_ind, ...]
     if center:
         mat = mat - np.mean(mat, axis=0)
 
@@ -156,7 +126,7 @@ def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer
     return u, s, vd
     
 
-def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, layer='attr', center=False,
+def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=None, layer='item_attr', center=False,
                            title_addon=None, colorbar=True, tick_fontsize='x-small'):
     """
     Plot the SVD loadings onto items of the empirical I/O matrix from a particular run.
@@ -178,7 +148,7 @@ def plot_item_svd_loadings(ax, res, snap_ind, run_ind, weighted=True, n_modes=No
     return image
 
 
-def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=None, layer='attr', center=False,
+def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=None, layer='item_attr', center=False,
                          title_addon=None, colorbar=True, tick_fontsize='x-small'):
     """
     Plot the SVD loadings onto attributes of the empirical I/O matrix from a particular run.
@@ -206,15 +176,12 @@ def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=Non
     return image
 
 
-def get_item_nmf_loadings_and_scores(res, snap_ind, run_ind, n_modes=None, layer='attr'):
+def get_item_nmf_loadings_and_scores(res, snap_ind, run_ind, n_modes=None, layer='item_attr'):
     """
     Do an NMF decomposition of the empirical I/O matrix
-    """
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
-    
+    """    
     model = NMF(n_components=n_modes, solver='mu', max_iter=500)
-    mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
+    mat = res['snaps'][layer][run_ind, snap_ind, ...]
     # a little hacky but I think it's reasonable to get all elements positive...
     mat_shifted = mat - np.min(mat)
     u = model.fit_transform(mat_shifted)
@@ -230,7 +197,7 @@ def get_item_nmf_loadings_and_scores(res, snap_ind, run_ind, n_modes=None, layer
     return u, vd
 
 
-def get_domain_mixing_score(res, snap_ind, run_ind, layer='attr'):
+def get_domain_mixing_score(res, snap_ind, run_ind, layer='item_attr'):
     """
     A method of quantifying to what extent SVD modes of the empirical I/O matrix traverse
     multiple domains.
@@ -263,13 +230,11 @@ def get_domain_mixing_score(res, snap_ind, run_ind, layer='attr'):
     return np.dot(weights, mode_entropies)
 
 
-def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
+def plot_domain_mixing_scores(ax, res, epoch_range=None, layer='item_attr',
                               with_ci=True, label=None, **plot_params):
     """Make a plot of mean domain mixing scores over epochs"""
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
     
-    iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
+    iomats = res['snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
         
@@ -299,12 +264,9 @@ def get_io_corr_rank(res, snap_ind, run_ind, layer='attr', center=True):
     return np.sum(cum_sv_power <= 0.99) + 1
 
 
-def plot_io_corr_ranks(ax, res, epoch_range=None, layer='attr', center=True,
+def plot_io_corr_ranks(ax, res, epoch_range=None, layer='item_attr', center=True,
                        with_ci=True, label=None, **plot_params):
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
-    
-    iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
+    iomats = res['snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
         
@@ -335,15 +297,12 @@ def get_full_vs_domain_rank_ratio(res, snap_ind, run_ind, layer, center=True):
     to the value it takes for the ground-truth I/O matrix) or for intermediate steps.
     This is selected with the layer argument, which should be 'repr', 'hidden', or 'attr'.
     """
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
-    
     try:
-        mat = res['iomat_snaps'][layer][run_ind, snap_ind, ...]
+        mat = res['snaps'][layer][run_ind, snap_ind, ...]
         if center:
             mat = mat - np.mean(mat, axis=0)
     except KeyError:
-         raise ValueError('Given results do not have I/O matrix information for the requested layer.')
+        raise ValueError('Given results do not have I/O matrix information for the requested layer.')
     
     full_mat_rank = get_io_corr_rank(res, snap_ind, run_ind, layer=layer, center=center)
     
@@ -375,12 +334,10 @@ def get_rank_domain_mixing_score(res, snap_ind, run_ind, layer):
     return rank_score
 
 
-def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='attr',
+def plot_rank_domain_mixing_scores(ax, res, epoch_range=None, layer='item_attr',
                                    with_ci=True, label=None, **plot_params):
-    if 'iomat_snaps' not in res:
-        calc_iomat_snaps(res)
     
-    iomats = res['iomat_snaps'][layer] # runs x snaps x items x attrs
+    iomats = res['snaps'][layer] # runs x snaps x items x attrs
     if epoch_range is None:
         epoch_range = range(iomats.shape[1])
         
@@ -537,10 +494,10 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
 
 def norm_rdm(dist_mat):
     """Helper to make a unit model RDM"""
-    norm = np.linalg.norm(dist_mat)
-    if norm == 0:
+    fronorm = np.linalg.norm(dist_mat)
+    if fronorm == 0:
         return dist_mat
-    return dist_mat / norm
+    return dist_mat / fronorm
 
 
 def center_and_norm_rdm(dist_mat):

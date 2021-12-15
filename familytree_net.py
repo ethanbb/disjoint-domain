@@ -45,7 +45,8 @@ train_defaults = {
     'do_tree_holdout': False,
     'reports_per_test': 4,
     'test_thresh': 0.85,
-    'test_max_epochs': 15000
+    'test_max_epochs': 15000,
+    'include_final_eval': True
 }
 
 
@@ -286,10 +287,10 @@ class FamilyTreeNet(nn.Module):
         train_inds = np.setdiff1d(range(self.n_inputs), holdout_inds)
         return train_inds, holdout_inds
     
-    def prepare_snapshots(self, snap_freq, num_epochs, **_extra):
+    def prepare_snapshots(self, snap_freq, num_epochs, include_final_eval, **_extra):
         """Make tensors to hold representation snapshots"""
         total_epochs = sum(num_epochs)
-        snap_epochs = util.calc_snap_epochs(snap_freq, total_epochs, 'lin')
+        snap_epochs = util.calc_snap_epochs(snap_freq, total_epochs, 'lin', include_final_eval)
         epoch_digits = len(str(snap_epochs[-1]))
         n_snaps = len(snap_epochs)
         
@@ -419,7 +420,7 @@ class FamilyTreeNet(nn.Module):
         if train_params['do_tree_holdout']:
             reports['new_tree_etg'] = np.zeros(n_etg, dtype=int)
         
-        for epoch in range(total_epochs + 1):
+        for epoch in range(total_epochs + (1 if train_params['include_final_eval'] else 0)):
             if epoch in change_epochs:
                 # Move to new stage of learning
                 k_change = change_epochs.index(epoch)

@@ -544,25 +544,26 @@ def get_item_svd_loadings(item_mat, attr_mat, n_domains):
     'hierarchical role'.
     """
     corr_mats = get_io_corr_matrix(item_mat, attr_mat, n_domains)
+    items_per = corr_mats[0].shape[1]
     svd_loading_list = []
     for i, corr_mat in enumerate(corr_mats):
         # randomly permute items when doing SVD to prevent bias
-        item_perm = torch.randperm(ITEMS_PER_DOMAIN, device='cpu')
+        item_perm = torch.randperm(items_per, device='cpu')
         # noinspection PyTupleAssignmentBalance
         _, s, vh = svd(corr_mat[:, item_perm], full_matrices=False)
         vh_scaled = np.empty_like(vh)
         vh_scaled[:, item_perm] = np.diag(s) @ vh
 
         if i == 0:
-            signflip_mat = np.eye(ITEMS_PER_DOMAIN)
+            signflip_mat = np.eye(items_per)
         else:
             # resolve sign ambiguity based on item correlation up to item permutation... brute force technique
             first_domain_v = svd_loading_list[0]
             best_signflip_mat_n = -1
             best_total_item_corr = -1  # at least half the max total corrs must be >= 0, so this is safe
 
-            for n in range(2 ** ITEMS_PER_DOMAIN):
-                curr_signflip_mat = get_nth_signflip_mat(ITEMS_PER_DOMAIN, n)
+            for n in range(2 ** items_per):
+                curr_signflip_mat = get_nth_signflip_mat(items_per, n)
                 item_corr_mat = first_domain_v @ curr_signflip_mat @ vh_scaled
                 # find permutation of columns (2nd items)
                 row_ind, col_ind = linear_sum_assignment(item_corr_mat, maximize=True)
@@ -571,7 +572,7 @@ def get_item_svd_loadings(item_mat, attr_mat, n_domains):
                     best_total_item_corr = total_item_corr
                     best_signflip_mat_n = n
 
-            signflip_mat = get_nth_signflip_mat(ITEMS_PER_DOMAIN, best_signflip_mat_n)
+            signflip_mat = get_nth_signflip_mat(items_per, best_signflip_mat_n)
             # end non-first-domain case
         svd_loading_list.append(vh_scaled.T @ signflip_mat)
         # end loop over domains

@@ -2,7 +2,6 @@
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
-from typing import Callable
 
 import util
 
@@ -91,17 +90,19 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
     Indexes into runs using the 'runs' argument
-    """    
+    """
+    if extra_keys is None:
+        extra_keys = []
+    
     with np.load(res_path, allow_pickle=True) as resfile:
         snaps = resfile['snapshots'].item() if 'snapshots' in resfile else {}
         reports = resfile['reports'].item()
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
         
-        if extra_keys is not None:
-            extra = {key: resfile[key] for key in extra_keys}
-        else:
-            extra = {}
+        if 'per_net_params' in resfile:
+            extra_keys.append('per_net_params')
+        extra = {key: resfile[key] for key in extra_keys}
         
     num_epochs = train_params['num_epochs']
     total_epochs = sum(num_epochs) if isinstance(num_epochs, tuple) else num_epochs    
@@ -134,7 +135,14 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
             snap_freq_scale = train_params['snap_freq_scale']
         except KeyError:
             snap_freq_scale = 'lin'
-        extra['snap_epochs'] = util.calc_snap_epochs(train_params['snap_freq'], total_epochs, snap_freq_scale)[::subsample_snaps]
+            
+        try:
+            include_final_eval = train_params['include_final_eval']
+        except KeyError:
+            include_final_eval = False
+
+        extra['snap_epochs'] = util.calc_snap_epochs(train_params['snap_freq'], total_epochs,
+                                                     snap_freq_scale, include_final_eval)[::subsample_snaps]
 
     report_epochs = np.arange(len(report_means['loss'])) * train_params['report_freq']
 #     report_epochs = np.arange(0, total_epochs + 1, train_params['report_freq'])

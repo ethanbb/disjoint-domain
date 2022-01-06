@@ -6,6 +6,7 @@ from copy import deepcopy
 from functools import cached_property
 import warnings
 from collections import OrderedDict
+import os
 
 import disjoint_domain as dd
 import util
@@ -21,7 +22,9 @@ net_defaults = {
     'param_init_type': 'normal', 'param_init_scale': 0.01,
     'fix_biases': False, 'fixed_bias': -2,
     'act_fn': torch.sigmoid, 'output_act_fn': None, 'loss_fn': nn.BCELoss,
-    'rng_seed': None, 'torchfp': None, 'device': None
+    'include_cross_domain_loss': True,
+    'rng_seed': None, 'torchfp': None, 'device': None,
+    'verbose': True
 }
 
 train_defaults = {
@@ -72,6 +75,9 @@ class DisjointDomainNet(nn.Module):
     - activation_fn: Function to use as nonlinearity for all layers
     - output_activation: If None, use same as activation_fn
     - loss_fn: Type of loss function to use (will be initialized with reduction='sum')
+    - include_cross_domain_loss: If False, mask outputs when computing loss so that
+                                 the gradient does not take into account each item's
+                                 outputs onto attributes of other domains.
     - rng_seed: Seed for the PyTorch RNG
     - torchfp: Override floating-point class to use for weights & activations
     - device: Override device (torch.device('cuda') or torch.device('cpu'))
@@ -94,8 +100,13 @@ class DisjointDomainNet(nn.Module):
         x_item = torch.tensor(item_mat, dtype=self.torchfp, device=self.device)
         x_context = torch.tensor(context_mat, dtype=self.torchfp, device=self.device)
         y = torch.tensor(attr_mat, dtype=self.torchfp, device=self.device)
+        
+        y_domain_mask = torch.block_diag(*[
+            torch.ones([s//self.n_domains for s in y.shape],
+                       dtype=self.torchfp, device=self.device)
+            for _ in range(self.n_domains)])
 
-        return x_item, x_context, y
+        return x_item, x_context, y, y_domain_mask
 
     def __init__(self, **net_params):
         super(DisjointDomainNet, self).__init__()
@@ -118,10 +129,11 @@ class DisjointDomainNet(nn.Module):
                 setattr(self, key, val)
             
         self.device, self.torchfp, _ = util.init_torch(self.device, self.torchfp)
-        if self.device.type == 'cuda':
-            print('Using CUDA')
-        else:
-            print('Using CPU')
+        if self.verbose:
+            if self.device.type == 'cuda':
+                print('Using CUDA')
+            else:
+                print('Using CPU')
 
         self.use_ctx_repr = self.use_ctx and self.use_ctx_repr
         if self.merged_repr:
@@ -208,7 +220,7 @@ class DisjointDomainNet(nn.Module):
                         raise ValueError('Unrecognized param init type')
 
         # make some data
-        self.x_item, self.x_context, self.y = self.gen_training_tensors()
+        self.x_item, self.x_context, self.y, self.y_domain_mask = self.gen_training_tensors()
         self.n_inputs = len(self.y)
 
         # individual item/context tensors for evaluating the network
@@ -312,11 +324,17 @@ class DisjointDomainNet(nn.Module):
     
     #--- Training and evaluation methods ---#
 
-    def b_outputs_correct(self, outputs, batch_inds):
+    def b_outputs_correct(self, outputs, batch_inds, domain_mask=False):
         """Element-wise function to find which outputs are correct for a batch"""
-        return torch.lt(torch.abs(outputs - self.y[batch_inds]), 0.1).to(self.torchfp)
+        if domain_mask:
+            outputs = outputs * self.y_domain_mask[batch_inds]
+            targets = self.y[batch_inds] * self.y_domain_mask[batch_inds]
+        else:
+            targets = self.y[batch_inds]
+        
+        return torch.lt(torch.abs(outputs - targets), 0.1).to(self.torchfp)
     
-    def weighted_acc(self, outputs, batch_inds):
+    def weighted_acc(self, outputs, batch_inds, domain_mask=False):
         """
         For each item in the batch, find the average of accuracy for 0s and accuracy for 1s
         (i.e. correct for unbalanced ground truth output)
@@ -328,24 +346,31 @@ class DisjointDomainNet(nn.Module):
         unset_weight = 0.5 / unset_attrs
         
         weights = torch.where(self.y[batch_inds].to(bool), set_weight, unset_weight)
-        b_correct = self.b_outputs_correct(outputs, batch_inds)
+        b_correct = self.b_outputs_correct(outputs, batch_inds, domain_mask=domain_mask)
         return torch.sum(weights * b_correct, dim=1)
     
-    def weighted_acc_loose(self, outputs, batch_inds):
+    def weighted_acc_loose(self, outputs, batch_inds, domain_mask=False):
         outputs_binary = (outputs > 0.5).to(self.torchfp)
-        return self.weighted_acc(outputs_binary, batch_inds)
+        return self.weighted_acc(outputs_binary, batch_inds, domain_mask=domain_mask)
 
     def evaluate_input_set(self, input_inds):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs (e.g. train or test)"""
         self.eval()
         with torch.no_grad():
             outputs = self(self.x_item[input_inds], self.x_context[input_inds])
-            loss = self.criterion(outputs, self.y[input_inds]) / len(input_inds)
+            if self.include_cross_domain_loss:
+                loss = self.criterion(outputs, self.y[input_inds]) / len(input_inds)
+            else:
+                masked_outputs = outputs * self.y_domain_mask[input_inds]
+                masked_targets = self.y[input_inds] * self.y_domain_mask[input_inds]
+                loss = self.criterion(masked_outputs, masked_targets) / len(input_inds)
+                
             acc = torch.mean(self.b_outputs_correct(outputs, input_inds)).item()
             wacc = torch.mean(self.weighted_acc(outputs, input_inds)).item()
             wacc_loose = torch.mean(self.weighted_acc_loose(outputs, input_inds)).item()
+            wacc_loose_masked = torch.mean(self.weighted_acc_loose(outputs, input_inds, True)).item()
 
-        return loss, acc, wacc, wacc_loose
+        return loss, acc, wacc, wacc_loose, wacc_loose_masked
 
     def train_epoch(self, order, batch_size, optimizer):
         """Do training on batches of given size of the examples indexed by order."""
@@ -356,6 +381,10 @@ class DisjointDomainNet(nn.Module):
         for batch_inds in torch.split(order, batch_size) if batch_size > 0 else [order]:
             optimizer.zero_grad()
             outputs = self(self.x_item[batch_inds], self.x_context[batch_inds])
+            
+            if not self.include_cross_domain_loss:
+                outputs = outputs * self.y_domain_mask[batch_inds]
+            
             loss = self.criterion(outputs, self.y[batch_inds])
             loss.backward()
             optimizer.step()
@@ -613,12 +642,13 @@ class DisjointDomainNet(nn.Module):
             params = {pname: torch.empty((n_snaps, *pval.shape)) for pname, pval in self.named_parameters()}
 
         n_report = (p['num_epochs']) // p['report_freq'] + 1
-        n_etg = (n_report-1) // p['reports_per_test'] + 1
-        reports = dict()
-        reports['loss'] = np.zeros(n_report)
-        reports['accuracy'] = np.zeros(n_report)
-        reports['weighted_acc'] = np.zeros(n_report)
-        reports['weighted_acc_loose'] = np.zeros(n_report)
+        n_etg = int((n_report-1) // p['reports_per_test'] + 1)
+        train_reports = ['loss', 'accuracy', 'weighted_acc',
+                         'weighted_acc_loose', 'weighted_acc_loose_indomain']
+        test_reports = ['test_accuracy', 'test_weighted_acc',
+                        'test_weighted_acc_loose', 'test_weighted_acc_loose_indomain']
+        
+        reports = {rname: np.zeros(n_report) for rname in train_reports}
         
         if holdout_item:
             reports['etg_item'] = np.zeros(n_etg, dtype=int)  # "epochs to generalize"
@@ -630,9 +660,8 @@ class DisjointDomainNet(nn.Module):
             reports['etg_domain'] = np.zeros(n_etg, dtype=int)
         
         if p['do_combo_testing']:
-            reports['test_accuracy'] = np.zeros(n_report)
-            reports['test_weighted_acc'] = np.zeros(n_report)
-            reports['test_weighted_acc_loose'] = np.zeros(n_report)
+            for test_rname in test_reports:
+                reports[test_rname] = np.zeros(n_report)
 
         for epoch in range(p['num_epochs'] + (1 if p['include_final_eval'] else 0)):
 
@@ -652,7 +681,8 @@ class DisjointDomainNet(nn.Module):
                 k_report = epoch // p['report_freq']
 
                 # get current performance
-                mean_loss, mean_acc, mean_wacc, mean_wacc_loose = self.evaluate_input_set(self.train_x_inds)
+                perf_stats = self.evaluate_input_set(self.train_x_inds)
+                mean_loss, mean_acc, mean_wacc, mean_wacc_loose, mean_wacc_loose_masked = perf_stats
 
                 report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
                               f'loss = {mean_loss:7.3f}, ' +
@@ -662,9 +692,10 @@ class DisjointDomainNet(nn.Module):
                 reports['accuracy'][k_report] = mean_acc
                 reports['weighted_acc'][k_report] = mean_wacc
                 reports['weighted_acc_loose'][k_report] = mean_wacc_loose
+                reports['weighted_acc_loose_indomain'][k_report] = mean_wacc_loose_masked
 
                 if do_holdout_testing and k_report % p['reports_per_test'] == 0:
-                    k_test = k_report // p['reports_per_test']
+                    k_test = int(k_report // p['reports_per_test'])
                     
                     # Do item and context generalize tests separately
                     if holdout_item:
@@ -692,11 +723,14 @@ class DisjointDomainNet(nn.Module):
                         reports['etg_domain'][k_test] = domain_etg
                         
                 if p['do_combo_testing']:
-                    _, test_acc, test_wacc, test_wacc_loose = self.evaluate_input_set(test_x_inds)
+                    test_perf_stats = self.evaluate_input_set(test_x_inds)
+                    test_acc, test_wacc, test_wacc_loose, test_wacc_loose_masked = test_perf_stats[1:]
+                    
                     report_str += f', test weighted acc = {test_wacc:.3f}'
                     reports['test_accuracy'][k_report] = test_acc
                     reports['test_weighted_acc'][k_report] = test_wacc
                     reports['test_weighted_acc_loose'][k_report] = test_wacc_loose
+                    reports['test_weighted_acc_loose_indomain'][k_report] = test_wacc_loose_masked
                                         
                 print(report_str)
 
@@ -798,18 +832,22 @@ def train_n_nets(n=36, run_type='', net_params=None, train_params=None):
     return save_name, net
 
 
-def restore_net(res_path, net_ind=0, epoch=-1):
-    """Reload a network that has parameters saved from a specific epoch, or the closest possible saved epoch."""
+def load_res_for_restoring(res_path):
     with np.load(res_path, allow_pickle=True) as resfile:
         parameters = resfile['parameters'].item()
         if parameters is None:
             raise RuntimeError('Cannot restore this network - parameters not saved')
+        ys = resfile['ys']
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
-        ys = resfile['ys']
         per_net_params = resfile['per_net_params'].item() if 'per_net_params' in resfile else {}
         train_x_inds = resfile['train_x_inds'] if 'train_x_inds' in resfile else None
         
+    return ys, parameters, net_params, per_net_params, train_params, train_x_inds
+
+
+def restore_loaded_net(ys, parameters, net_params, per_net_params, train_params, train_x_inds,
+                       net_ind, epoch):
     try:
         include_final_eval = train_params['include_final_eval']
     except KeyError:
@@ -830,10 +868,63 @@ def restore_net(res_path, net_ind=0, epoch=-1):
     for key, val in per_net_params.items():
         net_params[key] = val[net_ind]
     
+    net_params['verbose'] = False
     net = DisjointDomainNet(**net_params)
     net.load_state_dict(OrderedDict(epoch_state_dict))
     net.y = torch.tensor(ys[net_ind], device=net.device)
     if train_x_inds is not None:
         net.train_x_inds = train_x_inds[net_ind]
     
-    return net
+    return net, train_params
+
+
+def restore_net(res_path, net_ind=0, epoch=-1):
+    """Reload a network that has parameters saved from a specific epoch, or the closest possible saved epoch."""
+    [*loaded_net_vars] = load_res_for_restoring(res_path)
+    return restore_loaded_net(*loaded_net_vars, net_ind=net_ind, epoch=epoch)
+
+
+def restore_each_net_over_epochs(res_path, epochs):
+    """For each net saved in res_path, yield a generator that restores the net at each epoch in epochs."""
+    [ys, *other_net_vars] = load_res_for_restoring(res_path)
+    return (
+        (
+            restore_loaded_net(ys, *other_net_vars, net_ind=net_ind, epoch=epoch) 
+            for epoch in epochs
+        )
+        for net_ind in range(len(ys))
+    )
+
+
+def restore_and_holdout_test(res_path, epochs, save_path=None,
+                             net_restorer_generator=restore_each_net_over_epochs):
+    """Restore each net saved in res_path for each epoch in epochs and do domain holdout test"""
+    if save_path is None:
+        save_path = os.path.splitext(res_path)[0] + '_domain_holdout.npz'
+        
+    etg_all = []
+    for i, net_gen in enumerate(net_restorer_generator(res_path, epochs)):
+        etg_net = np.zeros(len(epochs))
+        print(f'Network {i} testing start')
+        print('-------------------------')
+        for j, (epoch, (net, train_params)) in enumerate(zip(epochs, net_gen)):
+            batch_size = train_params['batch_size']
+            optimizer = torch.optim.SGD(net.parameters(), lr=train_params['lr'])
+            included_inds = np.arange(net.n_inputs)
+            test_inds = np.arange(len(net.train_x_inds), net.n_inputs)
+            thresh = train_params['test_thresh']
+            max_epochs = train_params['test_max_epochs']
+            
+            etg, etg_str = net.generalize_test(
+                batch_size, optimizer, included_inds, test_inds,
+                thresh=thresh, max_epochs=max_epochs)
+            etg_net[j] = etg
+            print(f'Epoch {epoch}: {etg} epochs to generalize')
+            
+        print()
+        etg_all.append(etg_net)
+        
+    etg_all = np.stack(etg_all)
+    np.savez(save_path, test_epochs=epochs, etg=etg_all)
+            
+            

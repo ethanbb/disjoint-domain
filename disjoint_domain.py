@@ -1,13 +1,13 @@
 import numpy as np
-from scipy.linalg import block_diag, svd
+from scipy.linalg import block_diag
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
-from scipy.optimize import linear_sum_assignment
 import matplotlib.pyplot as plt
 import torch
 from typing import Dict, Any
 
 import util
+import problem_analysis as pa
 
 ITEMS_PER_DOMAIN = 8
 
@@ -498,92 +498,6 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, 
     return item_mat, context_mat, attr_mat
 
 
-def get_mean_attr_freqs(item_mat, attr_mat):
-    # collapse attribute matrix over contexts
-    y_collapsed = item_mat.T @ attr_mat
-    
-    # for each item, combine attributes with frequency of each attribute
-    attr_freq = np.sum(y_collapsed, axis=0)
-    return (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
-
-
-def get_attr_freq_dist_mat(item_mat, attr_mat):
-    item_mean_attr_freqs = get_mean_attr_freqs(item_mat, attr_mat)
-    return np.abs(item_mean_attr_freqs[np.newaxis, :] - item_mean_attr_freqs[:, np.newaxis])
-
-
-def get_io_corr_matrix(item_mat, attr_mat, n_domains):
-    """
-    Computes the input-output correlation matrix for each domain (defined in Saxe paper)
-    The result is a list of attrs_per_context x ITEMS_PER_DOMAIN matrices.
-    """
-    corr_mats = []
-
-    for i, (item_slab, attr_slab) in enumerate(zip(np.split(item_mat, n_domains), np.split(attr_mat, n_domains))):
-        item_submat = np.split(item_slab, n_domains, axis=1)[i]
-        attr_submat = np.split(attr_slab, n_domains, axis=1)[i]
-        corr_mats.append(attr_submat.T @ (item_submat / item_submat.shape[0]))
-
-    return corr_mats
-
-
-def get_nth_signflip_mat(size, n):
-    """
-    Utility to map integers in [0, 2^size-1] onto matrices with 1s and -1s along the diagonal.
-    """
-    assert 0 <= n < 2 ** size, 'n out of range'
-    bit_array = 1 << np.arange(size)
-    b_flip_entry = (n & bit_array) > 0
-    return np.eye(size) - 2 * np.diag(b_flip_entry)
-
-
-def get_item_svd_loadings(item_mat, attr_mat, n_domains):
-    """
-    Computes SVD V-matrices for each item in each domain and concatenates them along the item dimension (each row is an
-    item). The rows of the resulting matrix can be compared, e.g. with cityblock distance, to quantify differences in
-    'hierarchical role'.
-    """
-    corr_mats = get_io_corr_matrix(item_mat, attr_mat, n_domains)
-    items_per = corr_mats[0].shape[1]
-    svd_loading_list = []
-    for i, corr_mat in enumerate(corr_mats):
-        # randomly permute items when doing SVD to prevent bias
-        item_perm = torch.randperm(items_per, device='cpu')
-        # noinspection PyTupleAssignmentBalance
-        _, s, vh = svd(corr_mat[:, item_perm], full_matrices=False)
-        vh_scaled = np.empty_like(vh)
-        vh_scaled[:, item_perm] = np.diag(s) @ vh
-
-        if i == 0:
-            signflip_mat = np.eye(items_per)
-        else:
-            # resolve sign ambiguity based on item correlation up to item permutation... brute force technique
-            first_domain_v = svd_loading_list[0]
-            best_signflip_mat_n = -1
-            best_total_item_corr = -1  # at least half the max total corrs must be >= 0, so this is safe
-
-            for n in range(2 ** items_per):
-                curr_signflip_mat = get_nth_signflip_mat(items_per, n)
-                item_corr_mat = first_domain_v @ curr_signflip_mat @ vh_scaled
-                # find permutation of columns (2nd items)
-                row_ind, col_ind = linear_sum_assignment(item_corr_mat, maximize=True)
-                total_item_corr = item_corr_mat[row_ind, col_ind].sum()
-                if total_item_corr > best_total_item_corr:
-                    best_total_item_corr = total_item_corr
-                    best_signflip_mat_n = n
-
-            signflip_mat = get_nth_signflip_mat(items_per, best_signflip_mat_n)
-            # end non-first-domain case
-        svd_loading_list.append(vh_scaled.T @ signflip_mat)
-        # end loop over domains
-    return np.concatenate(svd_loading_list, axis=0)
-
-
-def get_item_svd_dist_mat(item_mat, attr_mat, n_domains):
-    loading_mat = get_item_svd_loadings(item_mat, attr_mat, n_domains)
-    return distance.squareform(distance.pdist(loading_mat, metric='cityblock'))
-
-
 def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
                          attrs_set_per_item=25, cluster_info='4-2-2', io_mats=None, figsize=(12, 6)):
     """Item and context inputs and attribute outputs for each input combination (regardless of domain)"""
@@ -624,7 +538,7 @@ def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per
                            cluster_info='4-2-2', metric='cityblock'):
     """Make RDM of similarities between the items' attributes, collapsed across contexts"""
     attrs = make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluster_info)
-    return util.get_attribute_rdm(attrs, metric=metric)
+    return pa.get_attribute_rdm(attrs, metric=metric)
 
 
 def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
@@ -686,7 +600,9 @@ def get_domain_colors():
     ]
 
 
-def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, device=None, **_extra):
+def get_items(train_only=False, n_domains=4, n_train_domains=None,
+              cluster_info='4-2-2', last_domain_cluster_info=None,
+              device=None, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
     if isinstance(cluster_info, list):
         # Can't assign symbols because the clusters vary over contexts
@@ -694,6 +610,9 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
         
     if isinstance(last_domain_cluster_info, list):
         last_domain_cluster_info = '8'
+    
+    if train_only and n_train_domains is not None:
+        n_domains = n_train_domains
     
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
@@ -710,8 +629,12 @@ def get_items(n_domains=4, cluster_info='4-2-2', last_domain_cluster_info=None, 
     return items, item_names
 
 
-def get_contexts(n_domains=4, ctx_per_domain=4, share_ctx=False, device=None, **_extra):
+def get_contexts(train_only=False, n_domains=4, n_train_domains=None,
+                 ctx_per_domain=4, share_ctx=False, device=None, **_extra):
     """Get context tensors (without repetitions) and their corresponding names"""
+    if train_only and n_train_domains is not None:
+        n_domains = n_train_domains
+    
     if share_ctx:
         contexts = torch.eye(ctx_per_domain, device=device)
         context_names = [str(n + 1) for n in range(ctx_per_domain)]

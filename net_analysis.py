@@ -1,4 +1,4 @@
-"""Functions for analyzing the training statistics and representations of a feedforward network"""
+"""Functions for analyzing the training statistics and representations of a feedforward network after training"""
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
@@ -66,6 +66,7 @@ def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_indivi
         
 def calc_mean_repr_dists(repr_snaps, dist_metric='euclidean', **_extra):
     def dist_fn(snaps):
+        # noinspection PyTypeChecker
         return distance.squareform(distance.pdist(snaps, metric=dist_metric))
     
     return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, calc_all=True)
@@ -105,11 +106,20 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
         extra = {key: resfile[key] for key in extra_keys}
         
     num_epochs = train_params['num_epochs']
-    total_epochs = sum(num_epochs) if isinstance(num_epochs, tuple) else num_epochs    
+    total_epochs = sum(num_epochs) if isinstance(num_epochs, tuple) else num_epochs
     
     # take subset of snaps and reports if necessary
     snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
+    
+    # if we did domain holdout testing, exclude the last domain from snapshots
+    nd = net_params['n_domains']
+    if 'holdout_testing' in train_params and train_params['holdout_testing'] == 'domain':
+        net_params['n_train_domains'] = nd - 1
+        for key, snap in snaps.items():
+            snaps[key] = np.delete(snap, slice(snap.shape[2] // nd * (nd - 1), None), axis=2)
+    else:
+        net_params['n_train_domains'] = nd
 
     report_stats = {
         report_type: util.get_mean_and_ci(report)
@@ -148,7 +158,10 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
 #     report_epochs = np.arange(0, total_epochs + 1, train_params['report_freq'])
     
     if 'reports_per_test' in train_params:
-        extra['etg_epochs'] = report_epochs[::train_params['reports_per_test']]
+        if train_params['reports_per_test'] == np.inf:
+            extra['etg_epochs'] = report_epochs[[0]]
+        else:
+            extra['etg_epochs'] = report_epochs[::train_params['reports_per_test']]
         
     return {
         'path': res_path,

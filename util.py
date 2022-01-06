@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 from scipy import stats
-from scipy.spatial import distance
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_svg import FigureCanvasSVG
 from mpl_toolkits import axes_grid1
 import seaborn as sns
 
@@ -178,11 +178,9 @@ def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
     return image
 
 
-def get_attribute_rdm(attrs, metric='cityblock'):
-    if isinstance(attrs, np.ndarray):
-        attrs = [attrs]
-    mean_dist = np.nanmean(np.stack([distance.pdist(a, metric=metric) for a in attrs]), axis=0)
-    return distance.squareform(mean_dist)
+def print_svg(figure, path):
+    svg_renderer = FigureCanvasSVG(figure)
+    svg_renderer.print_svg(path)
 
 
 def inv_sigmoid(x):

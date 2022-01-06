@@ -15,18 +15,21 @@ import ddnet
 import disjoint_domain as dd
 import util
 import net_analysis
+import problem_analysis as pa
 
 report_titles = {
     'loss': 'Mean loss',
     'accuracy': 'Mean accuracy',
     'weighted_acc': 'Mean accuracy (weighted)',
     'weighted_acc_loose': 'Mean weighted sign accuracy',
+    'weighted_acc_loose_indomain': 'Mean weighted sign accuracy (within domain)',
     'etg_item': 'Epochs to learn new items',
     'etg_context': 'Epochs to learn new contexts',
     'etg_domain': 'Epochs to learn new domain',
     'test_accuracy': 'Accuracy on novel item/context pairs',
     'test_weighted_acc': 'Mean generalization accuracy (weighted)',
-    'test_weighted_acc_loose': 'Generalization sign accuracy (weighted)'
+    'test_weighted_acc_loose': 'Generalization sign accuracy (weighted)',
+    'test_weighted_acc_loose_indomain': 'Generalization sign accuracy (weighted, within domain)'
 }
 
 
@@ -79,9 +82,9 @@ def plot_individual_reports(ax, res, report_type, **kwargs):
 def _get_names_for_snapshots(snap_type, **net_params):
     """Helper to retrieve input names depending on the type of snapshot"""
     if 'item' in snap_type or 'attr' in snap_type:
-        names = dd.get_items(**net_params)[1]
+        names = dd.get_items(train_only=True, **net_params)[1]
     elif 'context' in snap_type:
-        names = dd.get_contexts(**net_params)[1]
+        names = dd.get_contexts(train_only=True, **net_params)[1]
     else:
         raise ValueError('Unrecognized snapshot type')
     
@@ -395,7 +398,7 @@ def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
 
     # reshape and permute to aid plotting
     n_snaps = len(res['snap_epochs'])
-    n_domains = res['net_params']['n_domains']
+    n_domains = res['net_params']['n_train_domains']
     reprs_embedded = reprs_embedded.reshape((n_snaps, n_domains, -1, dims))
     reprs_embedded = reprs_embedded.transpose((1, 2, 3, 0))
 
@@ -769,7 +772,7 @@ def get_svd_dist_mats(res, normalize=False):
     ys = res['ys']
     item_mat = dd.make_io_mats(**res['net_params'])[0]
     n_domains = res['net_params']['n_domains']
-    svd_dist_mats = [dd.get_item_svd_dist_mat(item_mat, y, n_domains) for y in ys]
+    svd_dist_mats = [pa.get_contextfree_item_svd_dist_mat(item_mat, y, n_domains) for y in ys]
     if normalize:
         return np.stack([center_and_norm_rdm(mat) for mat in svd_dist_mats])
     return np.stack(svd_dist_mats)

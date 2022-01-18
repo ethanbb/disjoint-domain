@@ -64,12 +64,12 @@ def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_indivi
             return {'snaps': mean_dists_snaps}
 
         
-def calc_mean_repr_dists(repr_snaps, dist_metric='euclidean', **_extra):
+def calc_mean_repr_dists(repr_snaps, dist_metric='euclidean', include_individual=False, calc_all=True, **_extra):
     def dist_fn(snaps):
         # noinspection PyTypeChecker
         return distance.squareform(distance.pdist(snaps, metric=dist_metric))
     
-    return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, calc_all=True)
+    return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, include_individual=include_individual, calc_all=calc_all)
 
 
 def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual_corr_mats=False, **_extra):
@@ -86,7 +86,8 @@ def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual_corr
         
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
-                     compute_full_rdms=False, include_individual_corr_mats=False, extra_keys=None):
+                     compute_full_rdms=False, include_individual_corr_mats=False, include_individual_rdms=False,
+                     extra_keys=None):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -113,8 +114,10 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
     
     # if we did domain holdout testing, exclude the last domain from snapshots
-    nd = net_params['n_domains']
-    if 'holdout_testing' in train_params and train_params['holdout_testing'] == 'domain':
+    nd = net_params['n_domains'] if 'n_domains' in net_params else len(net_params['trees'])
+    did_dho = 'holdout_testing' in train_params and train_params['holdout_testing'] == 'domain'
+    did_dho = did_dho or 'do_tree_holdout' in train_params and train_params['do_tree_holdout']
+    if did_dho:
         net_params['n_train_domains'] = nd - 1
         for key, snap in snaps.items():
             snaps[key] = np.delete(snap, slice(snap.shape[2] // nd * (nd - 1), None), axis=2)
@@ -130,9 +133,10 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     report_cis = {report_type: rstats[1] for report_type, rstats in report_stats.items()}
 
     if len(snaps) > 0:
-        if compute_full_rdms:
+        if compute_full_rdms or include_individual_rdms:
             extra['repr_dists'] = {
-                snap_type: calc_mean_repr_dists(repr_snaps, metric=dist_metric)
+                snap_type: calc_mean_repr_dists(repr_snaps, metric=dist_metric, include_individual=include_individual_rdms, 
+                                                calc_all=compute_full_rdms)
                 for snap_type, repr_snaps in snaps.items()
             }
             

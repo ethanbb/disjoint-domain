@@ -714,65 +714,28 @@ def fit_linear_model(formula, data_dict):
     model = OLS(y, x)
     return model.fit()
 
-
-def _mean_attr_freqs_for_attr_vecs(y, ctx_per_domain, train_items=slice(None)):
-    """
-    Given some matrix of attributes (columns) for each item (rows),
-    return a vector of mean attribute frequencies.
-    """
-    inputs_per_domain = dd.ITEMS_PER_DOMAIN * ctx_per_domain
-    n_items = len(y) // ctx_per_domain
-    n_domains = n_items // dd.ITEMS_PER_DOMAIN
-
-    # first collapse attribute matrix over contexts
-    y_collapsed = np.empty((n_items, y.shape[1]))
-    for d in range(n_domains):
-        for i in range(dd.ITEMS_PER_DOMAIN):
-            d_offset = d * inputs_per_domain
-            i_abs = i + d * dd.ITEMS_PER_DOMAIN
-            strided_item_inds = np.arange(0, inputs_per_domain, dd.ITEMS_PER_DOMAIN) + d_offset + i
-            y_collapsed[i_abs, :] = np.sum(y[strided_item_inds], axis=0)
-
-    # exlcude items that weren't used for training
-    y_collapsed = y_collapsed[train_items]
-
-    # for each item, combine attributes with frequency of each attribute
-    attr_freq = np.sum(y_collapsed, axis=0)
-    return (y_collapsed @ attr_freq) / np.sum(y_collapsed, axis=1)
-
-
-def get_mean_attr_freqs(res, train_items=slice(None)):
-    """
-    Returns a vector of length n_items for each individual run which reports the the mean frequency of
-    all "on" attributes (# of items with that attribute), across all contexts, for each item.
-    """
-    ys = res['ys']
-    ctx_per_domain = res['net_params']['ctx_per_domain']
-    return np.stack([_mean_attr_freqs_for_attr_vecs(y, ctx_per_domain, train_items)
-                     for y in ys])
-
-
 def get_attr_freq_dist_mats(res, train_items=slice(None), normalize=False):
     """
     Returns a matrix for each individual run indicating how much the mean # of 
     attributes shared with other items differs for each item pair
     """
-    mean_attr_freqs = get_mean_attr_freqs(res, train_items)
-    attr_freq_dist_mats = np.abs(mean_attr_freqs[:, np.newaxis, :] - mean_attr_freqs[:, :, np.newaxis])
+    item_mat = dd.make_io_mats(**res['net_params'])[0][:, train_items]
+    attr_mats = res['ys']
+    attr_freq_dist_mats = [pa.get_attr_freq_dist_mat(item_mat, attr_mat) for attr_mat in attr_mats]
     if normalize:
-        return np.stack([center_and_norm_rdm(mat) for mat in attr_freq_dist_mats])
-    return attr_freq_dist_mats
+        attr_freq_dist_mats = [center_and_norm_rdm(mat) for mat in attr_freq_dist_mats]
+    return np.stack(attr_freq_dist_mats)
 
 
-def get_svd_dist_mats(res, normalize=False):
+def get_svd_dist_mats(res, train_items=slice(None), modes_to_use=slice(None), normalize=False):
     """
     Returns a matrix for each individual run indicating the difference between each pair of items
     as a cityblock distance of their SVD loadings. This is supposed to capture info abount hierarchical position.
     """
     ys = res['ys']
-    item_mat = dd.make_io_mats(**res['net_params'])[0]
-    n_domains = res['net_params']['n_domains']
-    svd_dist_mats = [pa.get_contextfree_item_svd_dist_mat(item_mat, y, n_domains) for y in ys]
+    item_mat = dd.make_io_mats(**res['net_params'])[0][:, train_items]
+    n_domains = res['net_params']['n_train_domains']
+    svd_dist_mats = [pa.get_contextfree_item_svd_dist(item_mat, y, n_domains, modes_to_use) for y in ys]
     if normalize:
         return np.stack([center_and_norm_rdm(mat) for mat in svd_dist_mats])
     return np.stack(svd_dist_mats)

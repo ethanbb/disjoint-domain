@@ -98,6 +98,8 @@ def calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale='lin', include_final
 
 def auto_subplots(n_rows, n_cols, ax_dims=(4, 4), prop_cycle=None):
     """Make subplots, automatically adjusting the figsize, and without squeezing"""
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError('Rows and columns must be positive')    
     figsize = (ax_dims[0] * n_cols, ax_dims[1] * n_rows)
     fig, axs = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
     for ax in axs.ravel():

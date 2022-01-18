@@ -76,11 +76,12 @@ def split_and_trim_matrix(matrix, sizes_or_sections, axis=0):
             raise ValueError(f'Cannot evenly split matrix into {sizes_or_sections} parts')
         indices_or_sections = sizes_or_sections
     else:
-        if sum(sizes_or_sections) != split_ax_len:
-            raise ValueError('Given sections do not add up to size of axis to split')
-        indices_or_sections = np.cumsum(sizes_or_sections)[:-1]
+        indices_or_sections = np.cumsum(sizes_or_sections)
 
     submats_untrimmed = np.split(matrix, indices_or_sections)
+    if not np.isscalar(sizes_or_sections):
+        # discard the last section, which is empty if the list of sizes adds up to the size of the dimension
+        submats_untrimmed = submats_untrimmed[:-1]
     submats = [mat[:, mat.any(axis=0)] for mat in submats_untrimmed]
 
     if axis == 1:

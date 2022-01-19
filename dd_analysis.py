@@ -38,7 +38,6 @@ auto_subplots = util.auto_subplots
 make_plot_grid = util.make_plot_grid
 outside_legend = util.outside_legend
 add_colorbar = util.add_colorbar
-imshow_centered_bipolar = util.imshow_centered_bipolar
 
 
 def get_result_means(res_path, **result_mean_opts):
@@ -49,6 +48,12 @@ def get_result_means(res_path, **result_mean_opts):
     for possible_fn in ddnet.callable_net_params:
         if possible_fn in res['net_params'] and callable(res['net_params'][possible_fn]):
             res['net_params'][possible_fn] = res['net_params'][possible_fn]()
+            
+    # make aliases for "item_" snapshots if contexts were not used
+    if not res['net_params']['use_ctx']:
+        for field in {'snaps', 'repr_corr', 'repr_dists'} & set(res.keys()):
+            snap_aliases = {'item_' + snap_type: val for snap_type, val in res[field].items() if 'item' not in snap_type}
+            res[field].update(snap_aliases)
             
     # add full item and context repr dists
     item_snaps = [res['snaps'][stype] for stype in ['item', 'item_hidden'] if stype in res['snaps']]
@@ -160,7 +165,7 @@ def plot_item_svd_scores(ax, res, snap_ind, run_ind, weighted=False, n_modes=Non
     if weighted:
         vd = np.diag(s) @ vd
 
-    image = imshow_centered_bipolar(ax, vd, aspect='auto')
+    image = util.imshow_centered_bipolar(ax, vd, aspect='auto')
     
     if colorbar:
         add_colorbar(image)
@@ -483,7 +488,7 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
     
     input_names = np.concatenate(input_names)
             
-    image = imshow_centered_bipolar(ax, corrs, interpolation='nearest')
+    image = util.imshow_centered_bipolar(ax, corrs, interpolation='nearest')
     ax.set_yticks(range(len(input_names)))
     ax.set_yticklabels(input_names)
     ax.set_xticks([])
@@ -493,22 +498,6 @@ def plot_hl_input_pattern_correlations(ax, res, run_num, snap_index, title_label
     add_colorbar(image)
     
     return image
-
-
-def norm_rdm(dist_mat):
-    """Helper to make a unit model RDM"""
-    fronorm = np.linalg.norm(dist_mat)
-    if fronorm == 0:
-        return dist_mat
-    return dist_mat / fronorm
-
-
-def center_and_norm_rdm(dist_mat):
-    """Helper to make a unit model RDM that sums to 0"""
-    dist_mat_centered = dist_mat - np.mean(dist_mat)
-#     dist_vec = distance.squareform(dist_mat)
-#     dist_mat_centered = distance.squareform(dist_vec - np.mean(dist_vec))
-    return norm_rdm(dist_mat_centered)
     
 
 def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50, clusters='4-2-2', **_extra):
@@ -531,19 +520,19 @@ def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50
 
     # spread
     n_items = n_domains * dd.ITEMS_PER_DOMAIN
-    #models = {'spread': norm_rdm(np.ones((n_items, n_items)))}
+    #models = {'spread': util.norm_rdm(np.ones((n_items, n_items)))}
     models = {'uniformity': np.full((n_items, n_items), 1 / n_items**2)}
     
     # in-domain attribute distance
     item_attr_rdm = dd.get_item_attribute_rdm(ctx_per_domain, attrs_per_context)
-    item_attr_model_1domain = center_and_norm_rdm(item_attr_rdm) / np.sqrt(n_domains)
+    item_attr_model_1domain = util.center_and_norm_rdm(item_attr_rdm) / np.sqrt(n_domains)
     models['attribute_similarity'] = block_diag(*[item_attr_model_1domain for _ in range(n_domains)])
     
     # cross vs. within-domain
     is_domain_eq = block_diag(*[np.ones((dd.ITEMS_PER_DOMAIN, dd.ITEMS_PER_DOMAIN), dtype=bool)
                                 for _ in range(n_domains)])
     nz_where_domain_ne = 1 - is_domain_eq
-    models['same_vs_different_domain'] = center_and_norm_rdm(nz_where_domain_ne)
+    models['same_vs_different_domain'] = util.center_and_norm_rdm(nz_where_domain_ne)
     
     # cross-domain group
     is_circle = np.equal(dd.item_group(clusters=clusters), 0)
@@ -551,11 +540,11 @@ def make_ortho_item_rsa_models(n_domains, ctx_per_domain=4, attrs_per_context=50
     diff_group_centered = is_diff_group - np.mean(is_diff_group)
     diff_group_tiled = np.tile(diff_group_centered, (n_domains, n_domains))
     diff_group_tiled[is_domain_eq] = 0  # make block diagonal zero
-    models['cross_domain_group_match'] = norm_rdm(diff_group_tiled)
+    models['cross_domain_group_match'] = util.norm_rdm(diff_group_tiled)
     
 #     # combination of attribute distance and cross-domain group
 #     tiled_item_attr = np.tile(item_attr_model_1domain, (n_domains, n_domains))
-#     models['attr_with_cross_domain'] = center_and_norm_rdm(models['attribute_similarity'] + (0.5 * nz_where_domain_ne) * tiled_item_attr)
+#     models['attr_with_cross_domain'] = util.center_and_norm_rdm(models['attribute_similarity'] + (0.5 * nz_where_domain_ne) * tiled_item_attr)
      
     return models
     
@@ -565,7 +554,7 @@ def make_ortho_context_rsa_models(n_domains, ctx_per_domain=4, **_extra):
     Makes a set of model RDMs for context representations. Similar to make_ortho_item_rsa_models,
     but with only the 'uniformity' and 'cross_vs_in_domain' types.
     """
-    # models = {'spread': norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
+    # models = {'spread': util.norm_rdm(1 - np.eye(n_domains * ctx_per_domain))}
     n_contexts = n_domains * ctx_per_domain
     models = {'uniformity': np.full((n_contexts, n_contexts), 1 / n_contexts**2)}
     
@@ -573,7 +562,7 @@ def make_ortho_context_rsa_models(n_domains, ctx_per_domain=4, **_extra):
     is_domain_eq = block_diag(*[np.ones((ctx_per_domain, ctx_per_domain), dtype=bool)
                                 for _ in range(n_domains)])
     nz_where_domain_ne = 1 - is_domain_eq
-    models['same_vs_different_domain'] = center_and_norm_rdm(nz_where_domain_ne)
+    models['same_vs_different_domain'] = util.center_and_norm_rdm(nz_where_domain_ne)
     
     return models
 
@@ -608,17 +597,8 @@ def test_model_validity(n_domains=4):
 
 def get_rdm_projections(res, snap_type='item', models=None):
     """
-    Make new "reports" (for each run, over time) of the projection of item similarity
-    matrices onto the model cross-domain and domain RDM
-    snap_name is the key of interest under the saved "snapshots" dict.
-    'item_full' and 'context_full' are special "snap types" that combine (concatenatse) all
-    snapshots with item and context inputs respectively (i.e. repr and hidden layers).
-    
-    If models are passed in, it should be a dictionary of normalized model matrices.
+    Wraps get_rdm_projections in net_analysis.py, using the orthogonal RSA models specified above by default.
     """
-    # Get the full snapshots (for each run)
-    snaps_each = res['repr_dists'][snap_type]['snaps_each']
-
     if models is None:
         if 'item' in snap_type:
             models = make_ortho_item_rsa_models(**res['net_params'])
@@ -627,19 +607,7 @@ def get_rdm_projections(res, snap_type='item', models=None):
         else:
             raise ValueError(f'Snapshot type {snap_type} not recognized')
             
-    n_runs, n_snap_epochs = snaps_each.shape[:2]
-    projections = {dim: np.empty((n_runs, n_snap_epochs)) for dim in models}
-    
-    for k_run, run_snaps in zip(range(n_runs), snaps_each):
-        for k_epoch, rdm in zip(range(n_snap_epochs), run_snaps):
-            normed_rdm = center_and_norm_rdm(rdm)
-
-            for dim, model in models.items():
-                if dim == 'uniformity':
-                    projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
-                else:
-                    projections[dim][k_run, k_epoch] = np.nansum(normed_rdm * model)
-    return projections
+    return net_analysis.get_rdm_projections(res, snap_type, models)
 
 
 def plot_rdm_projections(res, snap_type, axs, label=None, **plot_params):
@@ -723,21 +691,22 @@ def get_attr_freq_dist_mats(res, train_items=slice(None), normalize=False):
     attr_mats = res['ys']
     attr_freq_dist_mats = [pa.get_attr_freq_dist_mat(item_mat, attr_mat) for attr_mat in attr_mats]
     if normalize:
-        attr_freq_dist_mats = [center_and_norm_rdm(mat) for mat in attr_freq_dist_mats]
+        attr_freq_dist_mats = [util.center_and_norm_rdm(mat) for mat in attr_freq_dist_mats]
     return np.stack(attr_freq_dist_mats)
 
 
-def get_svd_dist_mats(res, train_items=slice(None), modes_to_use=slice(None), normalize=False):
+def get_svd_dist_mats(res, train_items=slice(None), modes_to_use=slice(None), normalize=False, n_domains=None):
     """
     Returns a matrix for each individual run indicating the difference between each pair of items
     as a cityblock distance of their SVD loadings. This is supposed to capture info abount hierarchical position.
     """
     ys = res['ys']
     item_mat = dd.make_io_mats(**res['net_params'])[0][:, train_items]
-    n_domains = res['net_params']['n_train_domains']
+    if n_domains is None:
+        n_domains = item_mat.shape[1] // dd.ITEMS_PER_DOMAIN
     svd_dist_mats = [pa.get_contextfree_item_svd_dist(item_mat, y, n_domains, modes_to_use) for y in ys]
     if normalize:
-        return np.stack([center_and_norm_rdm(mat) for mat in svd_dist_mats])
+        return np.stack([util.center_and_norm_rdm(mat) for mat in svd_dist_mats])
     return np.stack(svd_dist_mats)
 
 

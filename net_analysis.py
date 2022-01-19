@@ -250,3 +250,36 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
     ax.set_title(title)
 
     return image
+
+
+def get_rdm_projections(res, snap_type, models):
+    """
+    Make new "reports" (for each run, over time) of the projection of item similarity
+    matrices onto the model cross-domain and domain RDM
+    snap_name is the key of interest under the saved "snapshots" dict.
+    'item_full' and 'context_full' are special "snap types" that combine (concatenate) all
+    snapshots with item and context inputs respectively (i.e. repr and hidden layers).
+    
+    If models are passed in, it should be a dictionary of normalized model matrices.
+    Models can also be n_runs x n_items x n_items to use a separate one for each run.
+    """
+    # Get the full snapshots (for each run)
+    snaps_each = res['repr_dists'][snap_type]['snaps_each']
+            
+    n_runs, n_snap_epochs = snaps_each.shape[:2]
+    projections = {dim: np.empty((n_runs, n_snap_epochs)) for dim in models}
+    
+    for k_run, run_snaps in enumerate(snaps_each):
+        for k_epoch, rdm in enumerate(run_snaps):
+            normed_rdm = util.center_and_norm_rdm(rdm)
+
+            for dim, model in models.items():
+                if model.ndim > 3:
+                    raise ValueError('Models must be at most 3-dimensional')
+                if model.ndim == 3:
+                    model = model[k_run]
+                if dim == 'uniformity':
+                    projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
+                else:
+                    projections[dim][k_run, k_epoch] = np.nansum(normed_rdm * model)
+    return projections

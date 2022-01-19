@@ -96,6 +96,19 @@ def calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale='lin', include_final
     return list(np.unique(np.round(snap_epochs).astype(int)))
 
 
+def norm_rdm(dist_mat):
+    """Helper to make a unit model RDM. Operates on the last 2 dimensions of dist_mat."""
+    fronorm = np.linalg.norm(dist_mat, axis=(-2, -1), keepdims=True)
+    fronorm = np.where(fronorm, fronorm, 1)  # don't divide by zero
+    return dist_mat / fronorm
+
+
+def center_and_norm_rdm(dist_mat):
+    """Helper to make a unit model RDM that sums to 0"""
+    dist_mat_centered = dist_mat - np.mean(dist_mat, axis=(-2, -1), keepdims=True)
+    return norm_rdm(dist_mat_centered)
+
+
 def auto_subplots(n_rows, n_cols, ax_dims=(4, 4), prop_cycle=None):
     """Make subplots, automatically adjusting the figsize, and without squeezing"""
     if n_rows <= 0 or n_cols <= 0:

@@ -72,7 +72,7 @@ def calc_mean_repr_dists(repr_snaps, dist_metric='euclidean', include_individual
     return calc_mean_pairwise_repr_fn(repr_snaps, dist_fn, include_individual=include_individual, calc_all=calc_all)
 
 
-def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual_corr_mats=False, **_extra):
+def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual=False, **_extra):
     if corr_type == 'pearson':
         def corr_fn(snaps):
             return np.corrcoef(snaps)
@@ -82,7 +82,7 @@ def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual_corr
     else:
         raise ValueError(f'Unrecognized correlation type "{corr_type}"')
     
-    return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual_corr_mats)
+    return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual)
         
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
@@ -131,6 +131,14 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     
     report_means = {report_type: rstats[0] for report_type, rstats in report_stats.items()}
     report_cis = {report_type: rstats[1] for report_type, rstats in report_stats.items()}
+    
+    report_mstats = {
+        report_type: util.get_median_and_ci(report)
+        for report_type, report in reports.items()
+    }
+    
+    report_meds = {report_type: rstats[0] for report_type, rstats in report_mstats.items()}
+    report_med_cis = {report_type: rstats[1] for report_type, rstats in report_mstats.items()}
 
     if len(snaps) > 0:
         if compute_full_rdms or include_individual_rdms:
@@ -172,6 +180,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
         'snaps': snaps,
         'reports': report_means,
         'report_cis': report_cis,
+        'report_meds': report_meds,
+        'report_med_cis': report_med_cis,
         'net_params': net_params,
         'train_params': train_params,
         'report_epochs': report_epochs,
@@ -179,12 +189,16 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     }
 
 
-def plot_report(ax, res, report_type, with_ci=True, label=None, title=None, **plot_params):
+def plot_report(ax, res, report_type, with_ci=True, median=False, label=None, title=None,
+                **plot_params):
     """Make a standard plot of mean loss, accuracy, etc. over training"""
+    center_key = 'report_meds' if median else 'reports'
+    ci_key = 'report_med_cis' if median else 'report_cis'
+    
     xaxis = res['etg_epochs'] if 'etg' in report_type else res['report_epochs']
-    ax.plot(xaxis, res['reports'][report_type], label=label, **plot_params)
+    ax.plot(xaxis, res[center_key][report_type], label=label, **plot_params)
     if with_ci:
-        ax.fill_between(xaxis, *res['report_cis'][report_type], alpha=0.3)
+        ax.fill_between(xaxis, *res[ci_key][report_type], alpha=0.3)
         
     ax.set_xlabel('Epoch')
     if title is None:
@@ -252,7 +266,7 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
     return image
 
 
-def get_rdm_projections(res, snap_type, models):
+def get_rdm_projections(res, snap_type, models, corr_type='pearson'):
     """
     Make new "reports" (for each run, over time) of the projection of item similarity
     matrices onto the model cross-domain and domain RDM
@@ -278,8 +292,15 @@ def get_rdm_projections(res, snap_type, models):
                     raise ValueError('Models must be at most 3-dimensional')
                 if model.ndim == 3:
                     model = model[k_run]
-                if dim == 'uniformity':
-                    projections[dim][k_run, k_epoch] = np.nansum(rdm * model)
+                    
+                rdm_to_use = rdm if dim == 'uniformity' else normed_rdm
+                
+                if corr_type == 'pearson':
+                    projections[dim][k_run, k_epoch] = np.corrcoef([rdm_to_use.ravel(), model.ravel()])[0, 1]
+                elif corr_type == 'spearman':
+                    projections[dim][k_run, k_epoch] = stats.spearmanr(rdm_to_use, model, axis=None)[0]
+                elif corr_type == 'kendall':
+                    projections[dim][k_run, k_epoch] = stats.kendalltau(rdm_to_use, model)[0]
                 else:
-                    projections[dim][k_run, k_epoch] = np.nansum(normed_rdm * model)
+                    raise ValueError(f'Unrecognized correlation type "{corr_type}"')                   
     return projections

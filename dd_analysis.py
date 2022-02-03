@@ -115,6 +115,11 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, **kwargs):
     return net_analysis.plot_repr_corr(ax, res, snap_type, snap_ind, input_names, **kwargs)
 
 
+def plot_rdm(ax, res, snap_type, snap_ind, **kwargs):
+    input_names = _get_names_for_snapshots(snap_type, **res['net_params'])
+    return net_analysis.plot_rdm(ax, res, snap_type, snap_ind, input_names, **kwargs)
+
+
 def get_item_loadings_svs_and_scores(res, snap_ind, run_ind, n_modes=None, layer='item_attr', center=False):
     """
     Get SVD loading onto items of the empirical I/O matrix ('attr' snapshot) from a particular run.

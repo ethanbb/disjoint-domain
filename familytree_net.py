@@ -415,6 +415,7 @@ class FamilyTreeNet(nn.Module):
                             for this_lr, this_mm, this_wd in zip(lr, momentum, wd_torch)]
 
         test_optim_args = [{**optim_args, 'weight_decay': 0} for optim_args in train_optim_args]
+        # test_optim_args = train_optim_args
 
         optimizer = torch.optim.SGD(self.parameters(), **train_optim_args[0])
         

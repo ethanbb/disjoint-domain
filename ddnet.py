@@ -466,7 +466,7 @@ class DisjointDomainNet(nn.Module):
             snaps['attr'] = snaps['attr_preact'].clone()
             attr_preact = self.calc_attr_preact(self.x_item[self.train_x_inds], self.x_context[self.train_x_inds])
             snaps['attr_preact'][self.train_x_inds] = attr_preact
-            snaps['attr'] = self.output_act_fn(attr_preact)
+            snaps['attr'][self.train_x_inds] = self.output_act_fn(attr_preact)
             
             # if there are both items and contexts, get the versions that are averaged over those
             if self.use_ctx:
@@ -919,7 +919,7 @@ def restore_and_holdout_test(res_path, epochs, save_path=None,
                 batch_size, optimizer, included_inds, test_inds,
                 thresh=thresh, max_epochs=max_epochs)
             etg_net[j] = etg
-            print(f'Epoch {epoch}: {etg} epochs to generalize')
+            print(f'Epoch {epoch}: {etg_str} epochs to generalize')
             
         print()
         etg_all.append(etg_net)

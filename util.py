@@ -64,7 +64,7 @@ def choose_k_set_bits(a, k=1):
     return choose_k(np.flatnonzero(a), k)
 
 
-def get_mean_and_ci(series_set):
+def get_mean_and_ci(series_set, alpha=0.05):
     """
     Given a set of N time series, compute and return the mean
     along with 95% confidence interval using a t-distribution.
@@ -73,11 +73,28 @@ def get_mean_and_ci(series_set):
     mean = np.mean(series_set, axis=0)
     stderr = np.std(series_set, axis=0) / np.sqrt(n)
     interval = np.stack([
-        stats.t.interval(0.95, df=n-1, loc=m, scale=std) if std > 0 else (m, m)
+        stats.t.interval(1-alpha, df=n-1, loc=m, scale=std) if std > 0 else (m, m)
         for (m, std) in zip(mean, stderr)
     ], axis=1)
     
     return mean, interval
+
+
+def get_median_and_ci(series_set, alpha=0.05):
+    """
+    Given a set of N time series, compute and return then median
+    along with 95% confidence interval of the median.
+    """
+    median = np.median(series_set, axis=0)
+    ordered = np.sort(series_set, axis=0)
+    n = series_set.shape[0]
+    # ref 1: https://stats.stackexchange.com/questions/122001/confidence-intervals-for-median
+    # ref 2: https://www.statology.org/confidence-interval-for-median/
+    z = stats.norm.ppf(1 - alpha/2)
+    j = int(np.ceil(n/2 - z*np.sqrt(n)/2)) - 1
+    k = int(np.ceil(n/2 + z*np.sqrt(n)/2)) - 1
+    interval = ordered[[j, k], :]
+    return median, interval
 
 
 def calc_snap_epochs(snap_freq, num_epochs, snap_freq_scale='lin', include_final_eval=True, **_extra):
@@ -158,7 +175,7 @@ def imshow_pos(ax, mat, max_val=None, **imshow_args):
 
 def imshow_centered_bipolar(ax, mat, max_absval=None, **imshow_args):
     """Plot an image/matrix with a good diverging color palette, with the neutral color at 0"""
-    cmap = sns.color_palette('icefire', as_cmap=True)
+    cmap = sns.color_palette('vlag', as_cmap=True)
     if max_absval is None:
         max_absval = np.max(np.abs(mat))
     return ax.imshow(mat, cmap=cmap, vmin=-max_absval,

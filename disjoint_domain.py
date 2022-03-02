@@ -19,7 +19,10 @@ choose_k_set_bits = util.choose_k_set_bits
 
 def get_cluster_sizes(clusters):
     """Parse a 'clusters' string such as '4-2-2_suffix' to get the size of each cluster"""
-    sizes = [int(sz) for sz in clusters.partition('_')[0].split('-')]
+    try:
+        sizes = [int(sz) for sz in clusters.partition('_')[0].split('-')]
+    except ValueError:
+        return [ITEMS_PER_DOMAIN]
     if sum(sizes) != ITEMS_PER_DOMAIN:
         raise ValueError('Invalid clusters specification')
 
@@ -283,6 +286,39 @@ def _make_eq_freq_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
     return [attr_template.copy() for _ in range(ctx_per_domain)]
 
 
+def _make_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                             dist_accel=1, dist_offset=0, **_extra):
+    """
+    Make a set of attribute vectors to implement the "ordering" structure as depicted in
+    Figure 9 of Saxe et al., 2019.
+    'dist_accel' is the amount by which the number of unique attributes assigned to each item
+    increases as we iterate through the items.
+    'dist_offset' is the extra number of unique attributes assigned to each item.
+    """
+    n_accel_attrs = dist_accel * ITEMS_PER_DOMAIN * (ITEMS_PER_DOMAIN-1) // 2
+    n_offset_attrs = dist_offset * ITEMS_PER_DOMAIN
+    n_base_attrs = attrs_set_per_item - dist_offset
+    total_attrs_used = n_base_attrs + n_accel_attrs + n_offset_attrs
+    if total_attrs_used > attrs_per_context:
+        raise ValueError('Not enough attributes for these "ordering" settings')
+    
+    attr_template = np.zeros((ITEMS_PER_DOMAIN, attrs_per_context))
+    attr_template[:, :n_base_attrs] = 1
+    
+    # offset section
+    for i in range(ITEMS_PER_DOMAIN):
+        attr_template[i, n_base_attrs + i*dist_offset:n_base_attrs + (i+1)*dist_offset] = 1
+    
+    # accelerating section
+    accel_offset = n_base_attrs + n_offset_attrs
+    for i in range(1, ITEMS_PER_DOMAIN):
+        attr_template[i, :i*dist_accel] = 0
+        attr_template[i, accel_offset:accel_offset + i*dist_accel] = 1
+        accel_offset += i*dist_accel
+    
+    return [attr_template.copy() for _ in range(ctx_per_domain)]
+
+
 def _shuffle_attr_vec_mat(attr_vecs):
     """
     Given a matrix of attr_vecs (y), shuffles them in such a way
@@ -404,6 +440,8 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
             raise ValueError('eq-freq attributes are only defined for 4-2-2 clusters')
 
         attr_vec_fn = _make_eq_freq_attr_vecs
+    elif cluster_info['clusters'] == 'ordering':
+        attr_vec_fn = _make_ordering_attr_vecs
     else:
         n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
         try:
@@ -531,7 +569,7 @@ def plot_item_attributes(ctx_per_domain=4, attrs_per_context=50,
     ax3.set_yticks([])
     ax3.set_xticks(range(0, attr_mat.shape[1], 10))
 
-    return ax1, ax2, ax3
+    return fig, (ax1, ax2, ax3)
 
 
 def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
@@ -561,7 +599,7 @@ def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=
     ax.set_title('Item attribute dissimilarity, collapsed across contexts')
     ax.set_xlabel(f'{metric.capitalize()} distance')
     ax.set_ylabel('Input #')
-    return ax
+    return fig, ax
 
 
 def item_group(n=slice(None), clusters='4-2-2', **_extra):
@@ -611,8 +649,9 @@ def get_items(train_only=False, n_domains=4, n_train_domains=None,
     if isinstance(last_domain_cluster_info, list):
         last_domain_cluster_info = '8'
     
-    if train_only and n_train_domains is not None:
+    if train_only and n_train_domains is not None and n_train_domains < n_domains:
         n_domains = n_train_domains
+        last_domain_cluster_info = None  # don't use b/c the last domain isn't present here.
     
     cluster_info = normalize_cluster_info(cluster_info)
     last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None

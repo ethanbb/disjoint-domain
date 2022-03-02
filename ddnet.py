@@ -36,6 +36,7 @@ train_defaults = {
     'snap_freq_scale': 'lin',
     'scheduler': None,
     'holdout_testing': 'none',
+    'domains_to_hold_out': 0,
     'reports_per_test': 4,
     'test_thresh': 0.97,
     'test_max_epochs': 10000,
@@ -514,12 +515,16 @@ class DisjointDomainNet(nn.Module):
 
         return train_x_inds, test_x_item_inds, test_x_ctx_inds
     
-    def prepare_domain_holdout(self):
-        """Similar to prepare_holdout, but just hold out the last domain"""
-        print(f'Holding out domain {dd.domain_name(self.n_domains-1)}')
-        train_x_inds = np.arange(self.n_inputs - dd.ITEMS_PER_DOMAIN * self.ctx_per_domain)
-        test_x_inds = np.arange(len(train_x_inds), self.n_inputs)
-        
+    def prepare_domain_holdout(self, n=1):
+        """Similar to prepare_holdout, but just hold out the last n domains"""
+        held_out_domain_inds = range(self.n_domains-n, self.n_domains)
+        held_out_domains = [dd.domain_name(kd) for kd in held_out_domain_inds]
+        print(f'Holding out domain(s) {", ".join(held_out_domains)}')
+        x_per_domain = dd.ITEMS_PER_DOMAIN * self.ctx_per_domain
+        train_x_inds = np.arange(self.n_inputs - x_per_domain * n)
+        test_x_inds = {dname: x_per_domain * kd + np.arange(x_per_domain, dtype=int)
+                       for kd, dname in zip(held_out_domain_inds, held_out_domains)}
+                
         return train_x_inds, test_x_inds
     
     def prepare_combo_testing(self, n_per_domain=1):
@@ -597,9 +602,20 @@ class DisjointDomainNet(nn.Module):
         # Merge default params with overrides
         p = {**train_defaults, **train_params}
         
+        holdout_testing = p['holdout_testing'].lower() if p['holdout_testing'] is not None else None
+
+        # Deal with old domain holdout syntax
+        if p['domains_to_hold_out'] > 0:
+            if holdout_testing not in ['none', 'domain']:
+                raise ValueError("Can't do both domain and non-domain hold out")
+            holdout_testing = 'domain'
+        elif holdout_testing == 'domain':
+            if 'domains_to_hold_out' in train_params:  # case where holding out 0 domains was explicitly specified
+                raise ValueError('Must hold out > 0 domains if doing domain holdout')
+            p['domains_to_hold_out'] = 1
+        
         optimizer = torch.optim.SGD(self.parameters(), lr=p['lr'])
         
-        holdout_testing = p['holdout_testing'].lower() if p['holdout_testing'] is not None else None
         do_holdout_testing = holdout_testing is not None and holdout_testing != 'none'
         holdout_item = holdout_testing in ['full', 'item']
         holdout_ctx = holdout_testing in ['full', 'context', 'ctx']
@@ -614,7 +630,7 @@ class DisjointDomainNet(nn.Module):
         
         if do_holdout_testing:
             if holdout_testing == 'domain':
-                self.train_x_inds, test_x_inds = self.prepare_domain_holdout()
+                self.train_x_inds, test_x_inds = self.prepare_domain_holdout(n=p['domains_to_hold_out'])
             else:
                 self.train_x_inds, test_x_item_inds, test_x_ctx_inds = self.prepare_holdout(holdout_item, holdout_ctx)
                 
@@ -658,6 +674,8 @@ class DisjointDomainNet(nn.Module):
             
         if holdout_testing == 'domain':
             reports['etg_domain'] = np.zeros(n_etg, dtype=int)
+            for kd in range(1, p['domains_to_hold_out']):
+                reports[f'etg_domain{kd+1}'] = np.zeros(n_etg, dtype=int)
         
         if p['do_combo_testing']:
             for test_rname in test_reports:
@@ -715,12 +733,16 @@ class DisjointDomainNet(nn.Module):
                         reports['etg_context'][k_test] = ctx_etg
                         
                     if holdout_testing == 'domain':
-                        domain_etg, domain_etg_string = self.generalize_test(
-                            p['batch_size'], optimizer, np.arange(self.n_inputs), test_x_inds,
-                            thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
-                        )
-                        report_str += f', epochs for new domain {domain_etg_string:>{etg_digits}}'
-                        reports['etg_domain'][k_test] = domain_etg
+                        for kd, (dname, this_test_inds) in enumerate(test_x_inds.items()):
+                            included_inds = np.concatenate((self.train_x_inds, this_test_inds))
+                            
+                            domain_etg, domain_etg_string = self.generalize_test(
+                                p['batch_size'], optimizer, included_inds, this_test_inds,
+                                thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
+                            )
+                            report_str += f'\n\tEpochs to learn domain {dname}: {domain_etg_string:>{etg_digits}}'
+                            report_type = 'etg_domain' + (str(kd+1) if kd > 0 else '')
+                            reports[report_type][k_test] = domain_etg
                         
                 if p['do_combo_testing']:
                     test_perf_stats = self.evaluate_input_set(test_x_inds)

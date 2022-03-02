@@ -18,17 +18,17 @@ import net_analysis
 import problem_analysis as pa
 
 report_titles = {
-    'loss': 'Mean loss',
+    'loss': 'Loss',
     'accuracy': 'Mean accuracy',
     'weighted_acc': 'Mean accuracy (weighted)',
-    'weighted_acc_loose': 'Mean weighted sign accuracy',
+    'weighted_acc_loose': 'Fraction of correctly classified outputs,\ninversely weighted by class frequency',
     'weighted_acc_loose_indomain': 'Mean weighted sign accuracy (within domain)',
     'etg_item': 'Epochs to learn new items',
     'etg_context': 'Epochs to learn new contexts',
     'etg_domain': 'Epochs to learn new domain',
     'test_accuracy': 'Accuracy on novel item/context pairs',
     'test_weighted_acc': 'Mean generalization accuracy (weighted)',
-    'test_weighted_acc_loose': 'Generalization sign accuracy (weighted)',
+    'test_weighted_acc_loose': 'Fraction of correctly classified test outputs,\ninversely weighted by class frequency',
     'test_weighted_acc_loose_indomain': 'Generalization sign accuracy (weighted, within domain)'
 }
 
@@ -50,7 +50,7 @@ def get_result_means(res_path, **result_mean_opts):
             res['net_params'][possible_fn] = res['net_params'][possible_fn]()
             
     # make aliases for "item_" snapshots if contexts were not used
-    if not res['net_params']['use_ctx']:
+    if 'use_ctx' in res['net_params'] and not res['net_params']['use_ctx']:
         for field in {'snaps', 'repr_corr', 'repr_dists'} & set(res.keys()):
             snap_aliases = {'item_' + snap_type: val for snap_type, val in res[field].items() if 'item' not in snap_type}
             res[field].update(snap_aliases)
@@ -397,7 +397,7 @@ def plot_repr_embedding(ax, res, snap_type, snap_ind, colors=None):
         ax.annotate(name, pos)
         
     
-def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
+def plot_repr_trajectories(res, snap_type, dims=2, title_label='', epochs_to_mark=()):
     """
     Plot trajectories of each item or context representation over training
     using MDS. Can plot in 3D by settings dims to 3.
@@ -440,14 +440,25 @@ def plot_repr_trajectories(res, snap_type, dims=2, title_label=''):
             ax.plot(*reprs, linestyle, label=label, markersize=4, color=color, linewidth=0.5)
 
     # add start and end markers on top of everything else
+    inds_to_mark = []
+    if len(epochs_to_mark) > 0:
+        snap_epochs = res['snap_epochs']
+        for epoch in epochs_to_mark:
+            if epoch in snap_epochs:
+                inds_to_mark.append(snap_epochs.index(epoch))
+    
     for dom_reprs, dom_labels, color in zip(reprs_embedded, input_names, colors):
         for reprs, label, group in zip(dom_reprs, dom_labels, input_groups):
             marker = markers[group]
-
-            ax.plot(*reprs[:, 0], 'g' + marker, markersize=8)
-            ax.plot(*reprs[:, 0], marker, markersize=5, color=color)
-            ax.plot(*reprs[:, -1], 'r' + marker, markersize=8)
-            ax.plot(*reprs[:, -1], marker, markersize=5, color=color)
+                       
+            def mark_epoch(epoch_ind, bordercolor):
+                ax.plot(*reprs[:, epoch_ind], marker, markersize=8, color=bordercolor)
+                ax.plot(*reprs[:, epoch_ind], marker, markersize=5, color=color)
+                
+            mark_epoch(0, 'g')
+            mark_epoch(-1, 'r')
+            for ind in inds_to_mark:
+                mark_epoch(ind, 'k')
 
     ax.set_title(f'{title_label} {snap_type} representations over training\n' +
                  'color = domain, marker = type within domain')

@@ -3,19 +3,25 @@ import numpy as np
 
 
 class Couple:
-    def __init__(self, wife: 'FamilyMember', husband: 'FamilyMember'):
-        assert wife.couple is None and husband.couple is None, "Can't make couple from already-married members"
-        self.wife = wife
-        self.husband = husband
-        wife.couple = self
-        husband.couple = self
+    def __init__(self, *spouses: 'FamilyMember'):
+        for spouse in spouses:
+            assert spouse.couple is None, "Can't make couple from already-married members"
+            spouse.couple = self
+
+        self.spouses = spouses
         self.children = []
 
     def __str__(self):
-        return f'({self.wife}, {self.husband})'
+        return f'({", ".join(str(s) for s in self.spouses)})'
 
     def __repr__(self):
-        return f'Couple({self.wife!r}, {self.husband!r})'
+        return f'Couple({", ".join(repr(s) for s in self.spouses)}'
+
+    def get_wives(self):
+        return [s for s in self.spouses if s.sex == 'f']
+
+    def get_husbands(self):
+        return [s for s in self.spouses if s.sex == 'm']
 
 
 class RelationshipFn:
@@ -42,16 +48,16 @@ class FamilyMember:
 
     # Functions to get all relations of each type
     def get_fathers(self):
-        return [self.parents.husband] if self.parents is not None else []
+        return self.parents.get_husbands() if self.parents is not None else []
 
     def get_mothers(self):
-        return [self.parents.wife] if self.parents is not None else []
+        return self.parents.get_wives() if self.parents is not None else []
 
     def get_husbands(self):
-        return [self.couple.husband] if self.couple is not None and self.sex == 'f' else []
+        return [h for h in self.couple.get_husbands() if h is not self] if self.couple is not None else []
 
     def get_wives(self):
-        return [self.couple.wife] if self.couple is not None and self.sex == 'm' else []
+        return [w for w in self.couple.get_wives() if w is not self] if self.couple is not None else []
 
     def get_sons(self):
         return [child for child in self.get_children() if child.sex == 'm']
@@ -70,16 +76,18 @@ class FamilyMember:
 
     def get_siblings_w_inlaws(self):
         def get_own_siblings_with_inlaws(member):
-            return sum([[sib] + sib.get_spouses() for sib in member.get_siblings()], [])
+            return set(sum([[sib] + sib.get_spouses() for sib in member.get_siblings()], []))
 
-        my_side = get_own_siblings_with_inlaws(self)
-        spouses = self.get_spouses()
-        spouses_side = get_own_siblings_with_inlaws(spouses[0]) if len(spouses) > 0 else []
-        return list(set(my_side + spouses_side))
+        spouses = self.couple.spouses if self.couple is not None else [self]
+        all_sibs = set()
+        for spouse in spouses:
+            all_sibs |= get_own_siblings_with_inlaws(spouse)
+
+        return list(all_sibs)
 
     def get_piblings(self):
-        """pibliings = aunts and uncles"""
-        return self.parents.wife.get_siblings_w_inlaws() if self.parents is not None else []
+        """piblings = aunts and uncles"""
+        return self.parents.spouses[0].get_siblings_w_inlaws() if self.parents is not None else []
 
     def get_uncles(self):
         return [pib for pib in self.get_piblings() if pib.sex == 'm']
@@ -233,6 +241,22 @@ def get_hinton_tree(italian=False):
     return FamilyTree(members, couples)
 
 
+def get_asymmetric_english_tree():
+    """
+    Modify the English tree so that flipping it and flipping sexes isn't an isomorphism
+    I do this by making Christopher Penelope's son rather than husband.
+    """
+    english_tree = get_hinton_tree(italian=False)
+    (christopher, penelope, andrew, christine, maragaret, arthur,
+     victoria, james, jennifer, charles, colin, charlotte) = english_tree.members
+    (chrispen, andchris, margart, vicjames, jenncharles) = english_tree.couples
+    chrispen.spouses = chrispen.spouses[:-1]
+    chrispen.children.append(christopher)
+    christopher.couple = None
+    christopher.parents = chrispen
+    return english_tree
+
+
 def get_french_tree():
     """Make another family tree that is not isomorphic to the Hinton trees"""
     albert = FamilyMember('Albert', 'm')
@@ -265,5 +289,6 @@ def get_tree(name='english'):
     return {
         'english': lambda: get_hinton_tree(italian=False),
         'italian': lambda: get_hinton_tree(italian=True),
-        'french': get_french_tree
+        'french': get_french_tree,
+        'asym_english': get_asymmetric_english_tree
     }[name]()

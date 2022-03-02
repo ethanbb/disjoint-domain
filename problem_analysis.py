@@ -20,8 +20,14 @@ def get_attribute_rdm(attr_mats, metric='cityblock'):
     if isinstance(attr_mats, np.ndarray):
         attr_mats = [attr_mats]
     # noinspection PyTypeChecker
-    mean_dist = np.nanmean(np.stack([distance.pdist(a, metric=metric) for a in attr_mats]), axis=0)
-    return distance.squareform(mean_dist)
+    if metric == 'corr':
+        def distfn(mat):
+            return np.corrcoef(mat)
+    else:
+        def distfn(mat):
+            return distance.squareform(distance.pdist(mat, metric=metric))
+    mean_dist = np.nanmean(np.stack([distfn(a) for a in attr_mats]), axis=0)
+    return mean_dist
 
 
 def get_mean_attr_freqs(item_mat, attr_mat):

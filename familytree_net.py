@@ -47,7 +47,8 @@ train_defaults = {
     'reports_per_test': 4,
     'test_thresh': 0.85,
     'test_max_epochs': 15000,
-    'include_final_eval': True
+    'include_final_eval': True,
+    'reset_optim_params_during_holdout': True
 }
 
 
@@ -511,10 +512,21 @@ class FamilyTreeNet(nn.Module):
                 # testing
                 if train_params['do_tree_holdout'] and k_report % train_params['reports_per_test'] == 0:
                     k_ho = k_report // train_params['reports_per_test']
+                    
+                    # offset change epochs if we don't want to reset training parameters during holdout
+                    if not train_params['reset_optim_params_during_holdout']:
+                        test_change_epochs = [e - epoch for e in change_epochs]
+                        n_changes_passed = sum(e <= 0 for e in test_change_epochs)
+                        this_test_optim_args = test_optim_args[n_changes_passed:]
+                        test_change_epochs = test_change_epochs[n_changes_passed:]
+                    else:
+                        test_change_epochs = change_epochs
+                        this_test_optim_args = test_optim_args
+                    
                     etg, etg_string = self.generalize_test(
                         train_params['batch_size'], np.arange(self.n_inputs),
                         holdout_inds, train_params['test_max_epochs'], train_params['test_thresh'],
-                        change_epochs, test_optim_args
+                        test_change_epochs, this_test_optim_args
                     )
                     reports['new_tree_etg'][k_ho] = etg
                     report_str += f', epochs for new tree {etg_string:>{etg_digits}}'

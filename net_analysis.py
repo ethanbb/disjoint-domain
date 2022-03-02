@@ -1,4 +1,5 @@
 """Functions for analyzing the training statistics and representations of a feedforward network after training"""
+from copy import deepcopy
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
@@ -115,14 +116,17 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     
     # if we did domain holdout testing, exclude the last domain from snapshots
     nd = net_params['n_domains'] if 'n_domains' in net_params else len(net_params['trees'])
-    did_dho = 'holdout_testing' in train_params and train_params['holdout_testing'] == 'domain'
-    did_dho = did_dho or 'do_tree_holdout' in train_params and train_params['do_tree_holdout']
-    if did_dho:
-        net_params['n_train_domains'] = nd - 1
+    nd_train = nd
+    if 'domains_to_hold_out' in train_params and train_params['domains_to_hold_out'] > 0:
+        nd_train = nd - train_params['domains_to_hold_out']
+    elif ('holdout_testing' in train_params and train_params['holdout_testing'] == 'domain' or
+          'do_tree_holdout' in train_params and train_params['do_tree_holdout']):
+        nd_train = nd - 1
+
+    net_params['n_train_domains'] = nd_train
+    if nd_train < nd:
         for key, snap in snaps.items():
-            snaps[key] = np.delete(snap, slice(snap.shape[2] // nd * (nd - 1), None), axis=2)
-    else:
-        net_params['n_train_domains'] = nd
+            snaps[key] = np.delete(snap, slice(snap.shape[2] // nd * nd_train, None), axis=2)
 
     report_stats = {
         report_type: util.get_mean_and_ci(report)
@@ -187,6 +191,51 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
         'report_epochs': report_epochs,
         **extra
     }
+
+
+def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache, load_settings):
+    """
+    Given a nested dictionary of run paths, recursively load results using given load settings, using the cached data when possible.
+    Supports a special syntax to support loading runs with multiple held-out domains into multiple entries of the output.
+    Instead of a path, the run that copies from OtherRun (at the same level of hierarchy), using the held-out domain N
+    (counting from the first held-out domain) is specified as {'inherit_from': 'OtherRun', 'etg_domain': N}.
+    """
+    loaded_data = {}
+    # first load all entries that have paths
+    for key, val in res_path_dict.items():
+        if not isinstance(val, dict):
+            loaded_data[key] = (res_data_cache[key] if res_data_cache is not None and res_path_cache is not None and
+                                key in res_path_cache and res_path_cache[key] == val
+                                else get_result_means(val, **load_settings))
+            
+    for key, val in res_path_dict.items():
+        if isinstance(val, dict):
+            if 'inherit_from' in val:  # inherit from other loaded dataset, switching out the held-out domain 
+                loaded_data[key] = deepcopy(loaded_data[val['inherit_from']])
+                etg_key = f'etg_domain{val["etg_domain"]}'
+                for report_key in ['reports', 'report_cis', 'report_meds', 'report_med_cis']:
+                    if report_key in loaded_data[key]:
+                        assert etg_key in loaded_data[key][report_key], f'Cannot inherit from {val["inherit_from"]} - held-out domain {val["etg_domain"]} missing'
+                        loaded_data[key][report_key]['etg_domain'] = loaded_data[key][report_key][etg_key]    
+            else:  # recurse
+                sub_res_path_cache = res_path_cache[key] if key in res_path_cache else None
+                sub_res_data_cache = res_data_cache[key] if key in res_data_cache else None
+                loaded_data[key] = load_nested_runs_w_cache(val, sub_res_path_cache, sub_res_data_cache, load_settings)
+            
+    # put the results in the original order
+    return {key: loaded_data[key] for key in res_path_dict}
+
+
+def flatten_data_dict(data_dict, prefix=None):
+    """Flatten a dict containing loaded runs, using the UNIX path convention, without flattening the runs themselves"""
+    res = {}
+    for key, val in data_dict.items():
+        abskey = '/'.join([prefix, key]) if prefix is not None else key
+        if not isinstance(val, dict) or 'snaps' in val:
+            res[abskey] = val
+        else:
+            res.update(flatten_data_dict(val, prefix=abskey))
+    return res
 
 
 def plot_report(ax, res, report_type, with_ci=True, median=False, label=None, title=None,
@@ -257,6 +306,13 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
         
     image = util.plot_matrix_with_labels(ax, mat, labels, colorbar=colorbar, tick_fontsize=tick_fontsize,
                                          bipolar=True, max_val=1.0)
+    
+    # domain dividers
+    n_domains = res['net_params']['n_train_domains']
+    items_per_domain = mat.shape[0] // n_domains
+    for divider_pt in np.arange(items_per_domain-0.5, mat.shape[0]-0.5, items_per_domain):
+        ax.plot(ax.get_xlim(), [divider_pt, divider_pt], 'k', lw=1)
+        ax.plot([divider_pt, divider_pt], ax.get_ylim(), 'k', lw=1)
     
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:

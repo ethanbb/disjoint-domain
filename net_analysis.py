@@ -247,7 +247,7 @@ def plot_report(ax, res, report_type, with_ci=True, median=False, label=None, ti
     xaxis = res['etg_epochs'] if 'etg' in report_type else res['report_epochs']
     ax.plot(xaxis, res[center_key][report_type], label=label, **plot_params)
     if with_ci:
-        ax.fill_between(xaxis, *res[ci_key][report_type], alpha=0.3)
+        ax.fill_between(xaxis, *res[ci_key][report_type], alpha=0.3, **plot_params)
         
     ax.set_xlabel('Epoch')
     if title is None:

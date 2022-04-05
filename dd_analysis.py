@@ -21,14 +21,14 @@ report_titles = {
     'loss': 'Loss',
     'accuracy': 'Mean accuracy',
     'weighted_acc': 'Mean accuracy (weighted)',
-    'weighted_acc_loose': 'Fraction of correctly classified outputs,\ninversely weighted by class frequency',
+    'weighted_acc_loose': 'Fraction of correct output units, class-rebalanced',
     'weighted_acc_loose_indomain': 'Mean weighted sign accuracy (within domain)',
     'etg_item': 'Epochs to learn new items',
     'etg_context': 'Epochs to learn new contexts',
     'etg_domain': 'Epochs to learn new domain',
     'test_accuracy': 'Accuracy on novel item/context pairs',
     'test_weighted_acc': 'Mean generalization accuracy (weighted)',
-    'test_weighted_acc_loose': 'Fraction of correctly classified test outputs,\ninversely weighted by class frequency',
+    'test_weighted_acc_loose': 'Fraction of correct output units in test, class-rebalanced',
     'test_weighted_acc_loose_indomain': 'Generalization sign accuracy (weighted, within domain)'
 }
 

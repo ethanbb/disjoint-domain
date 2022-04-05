@@ -580,7 +580,7 @@ def get_item_attribute_rdm(ctx_per_domain=4, attrs_per_context=50, attrs_set_per
 
 
 def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25,
-                                   cluster_info='4-2-2', method='single', metric='euclidean', **_extra):
+                                   cluster_info='4-2-2', method='single', metric='euclidean', rel_color_thresh=0.6, **_extra):
     """Dendrogram of similarities between the items' attributes, collapsed across contexts"""
 
     dist_mat = get_item_attribute_rdm(ctx_per_domain, attrs_per_context,
@@ -594,12 +594,12 @@ def plot_item_attribute_dendrogram(ax=None, ctx_per_domain=4, attrs_per_context=
 
     z = hierarchy.linkage(condensed_dist, method=method)
     with plt.rc_context({'lines.linewidth': 2.5}):
-        hierarchy.dendrogram(z, ax=ax, orientation='right', color_threshold=0.6 * max(z[:, 2]),
-                             distance_sort='ascending', labels=np.array(item_names))
+        dgram = hierarchy.dendrogram(z, ax=ax, orientation='right', distance_sort='ascending', labels=np.array(item_names),
+                                     color_threshold=rel_color_thresh * max(z[:, 2]), above_threshold_color='black')
     ax.set_title('Item attribute dissimilarity, collapsed across contexts')
     ax.set_xlabel(f'{metric.capitalize()} distance')
     ax.set_ylabel('Input #')
-    return fig, ax
+    return dgram, ax
 
 
 def item_group(n=slice(None), clusters='4-2-2', **_extra):

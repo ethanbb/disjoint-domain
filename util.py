@@ -167,7 +167,8 @@ def imshow_pos(ax, mat, max_val=None, **imshow_args):
     if np.any(mat < 0):
         raise ValueError('Matrix must be nonnegative to use imshow_pos')
     
-    cmap = sns.color_palette('rocket', as_cmap=True)
+    # cmap = sns.color_palette('rocket', as_cmap=True)
+    cmap = sns.color_palette('light:indigo_r', as_cmap=True)
     if max_val is None:
         max_val = np.max(mat)
     return ax.imshow(mat, cmap=cmap, vmin=0, vmax=max_val, interpolation='nearest', **imshow_args)
@@ -175,7 +176,8 @@ def imshow_pos(ax, mat, max_val=None, **imshow_args):
 
 def imshow_centered_bipolar(ax, mat, max_absval=None, **imshow_args):
     """Plot an image/matrix with a good diverging color palette, with the neutral color at 0"""
-    cmap = sns.color_palette('vlag', as_cmap=True)
+    # cmap = sns.color_palette('vlag', as_cmap=True)
+    cmap = sns.diverging_palette(266, 12, s=80, as_cmap=True)
     if max_absval is None:
         max_absval = np.max(np.abs(mat))
     return ax.imshow(mat, cmap=cmap, vmin=-max_absval,

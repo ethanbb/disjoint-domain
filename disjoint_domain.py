@@ -58,7 +58,8 @@ def _make_n_dist_d_attr_vecs(centroid, n=4, d=4):
 
 
 def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                            clusters='4-2-2', intragroup_dists=None, intergroup_dist=40, **_extra):
+                            clusters='4-2-2', intragroup_dists=None, intergroup_dist=40,
+                            organized=False, **_extra):
     """
     Make some attribute vectors that conform to the Euclidean distance plot (Figure R3, bottom).
     There are 8 items. Outputs a list of ctx_per_domain 8 x attrs_per_context matrices.
@@ -74,6 +75,9 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
     intergroup_dist refers to the distance between the circle and "other item" centroids.
     
     clust_sizes: 3-item list of # of circles, squares, and stars. Currently # of stars must be 2.
+    
+    If 'organized' is true, permute the final matrix to put cluster centroids toward the beginning, to help
+    with visualization.
 
     """
     # Validate everything first
@@ -95,32 +99,61 @@ def _make_3_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
 
     attrs = [np.empty((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
 
-    for attr_mat in attrs:
+    for attr_mat in attrs:  
         # first, handle circles
         # choose centroid randomly
         circ_centroid = np.zeros(attrs_per_context)
-        circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)
+        circ_centroid_set = choose_k(np.arange(attrs_per_context), attrs_set_per_item)        
         circ_centroid_unset = np.setdiff1d(range(attrs_per_context), circ_centroid_set, assume_unique=True)
         circ_centroid[circ_centroid_set] = 1
+        if organized:
+            perm_vec = circ_centroid_set
 
         # now choose bits to flip for each of the 'circle' vectors, keeping total # set the same
         attr_mat[:n_circles] = _make_n_dist_d_attr_vecs(circ_centroid, n_circles, circ_dist)
+        if organized:
+            circle_attrs = np.flatnonzero(np.any(attr_mat[:n_circles], axis=0))
+            circle_new_attrs = np.setdiff1d(circle_attrs, perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, circle_new_attrs))
 
         # pick centroid for other items, which should be 40 bits away from this centroid.
         # (or overridden by setting intergroup_dist)
         other_centroid = circ_centroid.copy()
-        other_centroid[choose_k(circ_centroid_unset, intergroup_dist // 2)] = 1
+        other_centroid_new_attrs = choose_k(circ_centroid_unset, intergroup_dist // 2)
+        other_centroid[other_centroid_new_attrs] = 1
         other_centroid[choose_k(circ_centroid_set, intergroup_dist // 2)] = 0
+        if organized:
+            other_new_attrs = np.setdiff1d(other_centroid_new_attrs, perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, other_new_attrs))
 
         # now square and star centroids, which are centered on other_centroid and differ by 12 bits (by default)
         square_centroid, star_centroid = _make_n_dist_d_attr_vecs(other_centroid, 2, sqst_dist)
+        if organized:
+            square_new_attrs = np.setdiff1d(np.flatnonzero(square_centroid), perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, square_new_attrs))
 
         # squares differ by just 2 bits (by default). be a little imprecise and let one of them be the centroid.
-        attr_mat[n_circles + np.arange(n_squares)] = _make_n_dist_d_attr_vecs(square_centroid, n_squares, square_dist)
+        square_range = n_circles + np.arange(n_squares)
+        attr_mat[square_range] = _make_n_dist_d_attr_vecs(square_centroid, n_squares, square_dist)
+        if organized:
+            square_attrs = np.flatnonzero(np.any(attr_mat[square_range], axis=0))
+            square_new_attrs = np.setdiff1d(square_attrs, perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, square_new_attrs))
 
         # stars differ by 10 bits (by default).
         # again be a little imprecise, let one differ from centroid by 4 and the other by 6 (all unique)
         attr_mat[-n_stars:] = _make_n_dist_d_attr_vecs(star_centroid, n_stars, star_dist)
+        if organized:
+            star_new_attrs = np.setdiff1d(np.flatnonzero(star_centroid), perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, star_new_attrs))
+            star_attrs = np.flatnonzero(np.any(attr_mat[-n_stars:], axis=0))
+            star_new_attrs = np.setdiff1d(star_attrs, perm_vec, assume_unique=True)
+            perm_vec = np.concatenate((perm_vec, star_new_attrs))
+            
+            remaining_inds = np.setdiff1d(np.arange(attrs_per_context), perm_vec)
+            perm_vec = np.concatenate((perm_vec, remaining_inds))
+            
+            attr_mat[:] = attr_mat[:, perm_vec]
 
     return attrs
 
@@ -319,6 +352,27 @@ def _make_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_it
     return [attr_template.copy() for _ in range(ctx_per_domain)]
 
 
+def _make_saxe_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                                  n_set_step=1, **_extra):
+    """
+    Make "ordering" attribute vectors the way Saxe et al. do it, as in equation S63 in the supplement.
+    This method treats 'attrs_set_per_item' as a mean, but each item will have a different # of set attributes.
+    2022-04-27: changed so that attrs_set_per_item is the mean rather than the maximum.
+    """
+    n_set_range = n_set_step * (ITEMS_PER_DOMAIN-1)
+    max_n_set = attrs_set_per_item + n_set_range // 2
+    each_n_set = max_n_set - n_set_step * np.arange(ITEMS_PER_DOMAIN)
+    
+    if each_n_set[0] > attrs_per_context or each_n_set[-1] <= 0:
+        raise ValueError('Step in attributes set too large')
+        
+    attr_template = np.zeros((ITEMS_PER_DOMAIN, attrs_per_context))
+    for n_set, row in zip(each_n_set, attr_template):
+        row[:n_set] = 1
+        
+    return [attr_template.copy() for _ in range(ctx_per_domain)]
+                                  
+
 def _shuffle_attr_vec_mat(attr_vecs):
     """
     Given a matrix of attr_vecs (y), shuffles them in such a way
@@ -442,6 +496,8 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         attr_vec_fn = _make_eq_freq_attr_vecs
     elif cluster_info['clusters'] == 'ordering':
         attr_vec_fn = _make_ordering_attr_vecs
+    elif cluster_info['clusters'] == 'saxe-ordering':
+        attr_vec_fn = _make_saxe_ordering_attr_vecs
     else:
         n_clusts = len(get_cluster_sizes(cluster_info['clusters']))
         try:

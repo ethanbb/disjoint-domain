@@ -339,12 +339,10 @@ class DisjointDomainNet(nn.Module):
         """
         For each item in the batch, find the average of accuracy for 0s and accuracy for 1s
         (i.e. correct for unbalanced ground truth output)
-        """
-        set_attrs = self.attrs_set_per_item
-        unset_attrs = self.n_attributes - set_attrs
-        
-        set_weight = 0.5 / set_attrs
-        unset_weight = 0.5 / unset_attrs
+        """        
+        set_attrs_per_item = torch.sum(self.y[batch_inds], dim=1, keepdim=True)
+        set_weight = 0.5 / set_attrs_per_item
+        unset_weight = 0.5 / (self.n_attributes - set_attrs_per_item)
         
         weights = torch.where(self.y[batch_inds].to(bool), set_weight, unset_weight)
         b_correct = self.b_outputs_correct(outputs, batch_inds, domain_mask=domain_mask)
@@ -354,7 +352,7 @@ class DisjointDomainNet(nn.Module):
         outputs_binary = (outputs > 0.5).to(self.torchfp)
         return self.weighted_acc(outputs_binary, batch_inds, domain_mask=domain_mask)
 
-    def evaluate_input_set(self, input_inds):
+    def evaluate_input_set(self, input_inds, all_masked=False):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs (e.g. train or test)"""
         self.eval()
         with torch.no_grad():
@@ -367,11 +365,14 @@ class DisjointDomainNet(nn.Module):
                 loss = self.criterion(masked_outputs, masked_targets) / len(input_inds)
                 
             acc = torch.mean(self.b_outputs_correct(outputs, input_inds)).item()
-            wacc = torch.mean(self.weighted_acc(outputs, input_inds)).item()
-            wacc_loose = torch.mean(self.weighted_acc_loose(outputs, input_inds)).item()
-            wacc_loose_masked = torch.mean(self.weighted_acc_loose(outputs, input_inds, True)).item()
-
-        return loss, acc, wacc, wacc_loose, wacc_loose_masked
+            wacc = torch.mean(self.weighted_acc(outputs, input_inds, all_masked)).item()
+            wacc_loose = torch.mean(self.weighted_acc_loose(outputs, input_inds, all_masked)).item()\
+            
+            if not all_masked:
+                wacc_loose_masked = torch.mean(self.weighted_acc_loose(outputs, input_inds, True)).item()
+                return loss, acc, wacc, wacc_loose, wacc_loose_masked
+            else:
+                return loss, acc, wacc, wacc_loose
 
     def train_epoch(self, order, batch_size, optimizer):
         """Do training on batches of given size of the examples indexed by order."""
@@ -407,7 +408,7 @@ class DisjointDomainNet(nn.Module):
         while epochs < max_epochs:
             order = util.permute(included_inds)
             self.train_epoch(order, batch_size, optimizer)
-            mean_target_wacc = self.evaluate_input_set(targets)[2]
+            mean_target_wacc = self.evaluate_input_set(targets, all_masked=not self.include_cross_domain_loss)[2]
 
             if mean_target_wacc >= thresh:
                 break

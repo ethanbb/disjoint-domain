@@ -3,8 +3,12 @@ from copy import deepcopy
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
+from scipy.linalg import block_diag
 
 import util
+import problem_analysis as pa
+from familytree_net import FamilyTreeNet
+from ddnet import DisjointDomainNet
 
 
 def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_individual=False):
@@ -80,15 +84,84 @@ def calc_mean_repr_corr(repr_snaps, corr_type='pearson', include_individual=Fals
     elif corr_type == 'spearman':
         def corr_fn(snaps):
             return stats.spearmanr(snaps, axis=1)[0]
+    elif corr_type == 'covar':
+        def corr_fn(snaps):
+            return snaps @ snaps.T
+    elif corr_type == 'covar_centered':
+        def corr_fn(snaps):
+            iomat_centered = (snaps - np.mean(snaps, axis=1, keepdims=True)) / len(snaps)
+            return iomat_centered @ iomat_centered.T
     else:
         raise ValueError(f'Unrecognized correlation type "{corr_type}"')
     
     return calc_mean_pairwise_repr_fn(repr_snaps, corr_fn, calc_all=False, include_individual=include_individual)
+
+
+def recover_training_matrices(net_params, n_domains, n_train_domains, ys):
+    """Make an instance of the network to recover the input matrix in the domains of interest"""
+    if 'trees' in net_params:
+        dummy_net = FamilyTreeNet(**net_params)
+        full_inputs = dummy_net.person1_mat.detach().cpu().numpy()
+    else:
+        dummy_net = DisjointDomainNet(**net_params)
+        full_inputs = dummy_net.x_item.detach().cpu().numpy()
+    
+    # take just training domains
+    per_domain_inputs = pa.split_and_trim_matrix(full_inputs, n_domains, axis=1)
+    training_inputs = block_diag(*per_domain_inputs[:n_train_domains])
+    
+    # now slice the y (attribute) matrices, just along the x (first) dimension (want to preserve full attr vectors)
+    training_ys = ys[:, :len(training_inputs), :]
+    
+    return training_inputs, training_ys
+
+
+def basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots):
+    """
+    For a single run, compute 2 things over snapshot epochs for given output snapshots (epochs x inputs x outputs):
+    - The projection of input/output correlation matrix onto each given SV basis
+    - The residual matrix, i.e. input/output correlation not accounted for by the ground truth modes.
+    """
+    # Get basis matrices, then compare i/o matrix of each epoch
+    n_modes = len(basis_mats)
+    n_epochs = len(snapshots)
+    effective_svs = np.empty((n_modes, n_epochs))
+    residuals = np.empty((n_epochs, basis_mats.shape[2], basis_mats.shape[1]))
+    frac_explained = np.empty(n_epochs)
+    
+    for kepoch, snap in enumerate(snapshots):
+        epoch_iomat = pa.get_contextfree_io_corr_matrix(training_inputs, snap)
+        effective_svs[:, kepoch] = pa.get_effective_svs(epoch_iomat, basis_mats)
+        recon_iomat = np.tensordot(effective_svs[:, kepoch], basis_mats, axes=1)
+        residuals[kepoch] = (epoch_iomat - recon_iomat).T
+        
+        # compute covar of each to get frac_explained
+        epoch_iomat_centered = epoch_iomat - np.mean(epoch_iomat, axis=0, keepdims=True)
+        epoch_iomat_var = np.var(epoch_iomat_centered.T @ epoch_iomat_centered)
+        resid_centered = residuals[kepoch] - np.mean(residuals[kepoch], axis=1, keepdims=True)
+        resid_var = np.var(resid_centered @ resid_centered.T)
+        frac_explained[kepoch] = (epoch_iomat_var - resid_var) / epoch_iomat_var
+        
+    return effective_svs, residuals, frac_explained
+
+
+def calc_effective_svs_and_residuals(training_inputs, training_y, snapshots):
+    """See above - effective SVs and residuals for regular basis matrices"""
+    basis_mats = pa.get_io_corr_basis_mats_and_svs(training_inputs, training_y)[0]
+    return basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots)
+
+
+def calc_paired_effective_svs_and_residuals(training_inputs, training_y, snapshots):
+    io_corr_mat = pa.get_contextfree_io_corr_matrix(training_inputs, training_y)
+    u, _, vh = pa.corr_mat_svd(io_corr_mat, center=False)
+    paired_u, paired_vh = pa.combine_sv_mode_groups_aligning_items(u, vh, n_domains=2)
+    basis_mats = np.einsum('ij,jk->jik', paired_u, paired_vh)
+    return basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots)
         
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
                      compute_full_rdms=False, include_individual_corr_mats=False, include_individual_rdms=False,
-                     extra_keys=None):
+                     extra_keys=None, include_rdms=False, effective_sv_snaps=(), pair_effective_sv_snaps=()):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -96,6 +169,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     """
     if extra_keys is None:
         extra_keys = []
+        
+    possibly_missing = ['per_net_params', 'ys']
     
     with np.load(res_path, allow_pickle=True) as resfile:
         snaps = resfile['snapshots'].item() if 'snapshots' in resfile else {}
@@ -103,18 +178,13 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
         net_params = resfile['net_params'].item()
         train_params = resfile['train_params'].item()
         
-        if 'per_net_params' in resfile:
-            extra_keys.append('per_net_params')
-        extra = {key: resfile[key] for key in extra_keys}
-        
-    num_epochs = train_params['num_epochs']
-    total_epochs = sum(num_epochs) if isinstance(num_epochs, tuple) else num_epochs
+        for key in possibly_missing:
+            if key in resfile:
+                extra_keys.append(key)
+
+        extra = {key: resfile[key].item() if resfile[key].dtype == 'object' else resfile[key] for key in extra_keys}
     
-    # take subset of snaps and reports if necessary
-    snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
-    reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
-    
-    # if we did domain holdout testing, exclude the last domain from snapshots
+    # if we did domain holdout testing, exclude the last domain(s) from snapshots
     nd = net_params['n_domains'] if 'n_domains' in net_params else len(net_params['trees'])
     nd_train = nd
     if 'domains_to_hold_out' in train_params and train_params['domains_to_hold_out'] > 0:
@@ -124,9 +194,52 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
         nd_train = nd - 1
 
     net_params['n_train_domains'] = nd_train
+    
+    if len(effective_sv_snaps) > 0 or len(pair_effective_sv_snaps) > 0:
+        # get training inputs and outputs to use later
+        try:
+            training_inputs, training_ys = recover_training_matrices(net_params, nd, nd_train, extra['ys'])
+        except KeyError:
+            raise RuntimeError('Need ys for effective svs and residuals, but not found in results file')
+        
+    num_epochs = train_params['num_epochs']
+    total_epochs = sum(num_epochs) if isinstance(num_epochs, tuple) else num_epochs
+    
+    # take subset of snaps and reports if necessary
+    snaps = {stype: snap[runs, ::subsample_snaps, ...] for stype, snap in snaps.items()}
+    reports = {rtype: report[runs, ...] for rtype, report in reports.items()}
+    
     if nd_train < nd:
         for key, snap in snaps.items():
             snaps[key] = np.delete(snap, slice(snap.shape[2] // nd * nd_train, None), axis=2)
+            
+    # Add special reports and snapshots for SV mode projections and residuals, respectively
+    sv_snap_paired = np.repeat([False, True], [len(effective_sv_snaps), len(pair_effective_sv_snaps)])
+    for sv_snap_type, paired in zip(effective_sv_snaps + pair_effective_sv_snaps, sv_snap_paired):
+        paired_tag = 'paired_' if paired else ''
+        calc_fn = calc_paired_effective_svs_and_residuals if paired else calc_effective_svs_and_residuals
+        
+        base_snaps = snaps[sv_snap_type]
+        n_inputs = n_modes = training_inputs.shape[1]
+        if paired:
+            n_modes //= 2
+        n_outputs = training_ys.shape[2]
+        n_runs, n_epochs = base_snaps.shape[:2]
+        
+        snaps[f'{sv_snap_type}_iomat_{paired_tag}residuals'] = np.empty((n_runs, n_epochs, n_inputs, n_outputs))
+        extra[f'{sv_snap_type}_iomat_{paired_tag}a_all'] = np.empty((n_runs, n_modes, n_epochs))
+        reports[f'{sv_snap_type}_iomat_{paired_tag}frac_explained'] = np.empty((n_runs, n_epochs))
+        for kmode in range(n_modes):
+            reports[f'{sv_snap_type}_iomat_{paired_tag}a{kmode}'] = np.empty((n_runs, n_epochs))
+        
+        # iterate over runs
+        for krun, (training_y, run_snaps) in enumerate(zip(training_ys, base_snaps)):
+            sv_projs, residuals, frac_explained = calc_fn(training_inputs, training_y, run_snaps)
+            snaps[f'{sv_snap_type}_iomat_{paired_tag}residuals'][krun] = residuals
+            extra[f'{sv_snap_type}_iomat_{paired_tag}a_all'][krun] = sv_projs
+            reports[f'{sv_snap_type}_iomat_{paired_tag}frac_explained'][krun] = frac_explained
+            for kmode in range(n_modes):
+                reports[f'{sv_snap_type}_iomat_{paired_tag}a{kmode}'][krun] = sv_projs[kmode]
 
     report_stats = {
         report_type: util.get_mean_and_ci(report)
@@ -145,7 +258,7 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     report_med_cis = {report_type: rstats[1] for report_type, rstats in report_mstats.items()}
 
     if len(snaps) > 0:
-        if compute_full_rdms or include_individual_rdms:
+        if include_rdms or compute_full_rdms or include_individual_rdms:
             extra['repr_dists'] = {
                 snap_type: calc_mean_repr_dists(repr_snaps, metric=dist_metric, include_individual=include_individual_rdms, 
                                                 calc_all=compute_full_rdms)
@@ -193,7 +306,8 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     }
 
 
-def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache, load_settings):
+def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache, 
+                             load_settings, load_fn=get_result_means):
     """
     Given a nested dictionary of run paths, recursively load results using given load settings, using the cached data when possible.
     Supports a special syntax to support loading runs with multiple held-out domains into multiple entries of the output.
@@ -206,7 +320,7 @@ def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache, load
         if not isinstance(val, dict):
             loaded_data[key] = (res_data_cache[key] if res_data_cache is not None and res_path_cache is not None and
                                 key in res_path_cache and res_path_cache[key] == val
-                                else get_result_means(val, **load_settings))
+                                else load_fn(val, **load_settings))
             
     for key, val in res_path_dict.items():
         if isinstance(val, dict):
@@ -220,7 +334,7 @@ def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache, load
             else:  # recurse
                 sub_res_path_cache = res_path_cache[key] if key in res_path_cache else None
                 sub_res_data_cache = res_data_cache[key] if key in res_data_cache else None
-                loaded_data[key] = load_nested_runs_w_cache(val, sub_res_path_cache, sub_res_data_cache, load_settings)
+                loaded_data[key] = load_nested_runs_w_cache(val, sub_res_path_cache, sub_res_data_cache, load_settings, load_fn)
             
     # put the results in the original order
     return {key: loaded_data[key] for key in res_path_dict}
@@ -272,16 +386,17 @@ def plot_individual_reports(ax, res, report_type, title=None, **plot_params):
     util.outside_legend(ax, ncol=2, fontsize='x-small')
     
     
-def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None,
-             colorbar=True, actual_rdm=None, tick_fontsize='x-small'):
+def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None, fix_range=False,
+             colorbar=True, actual_mat=None, tick_fontsize='x-small'):
     """
     Plot a representational dissimilarity matrix (RDM) for the representation of inputs at a particular epoch.
     If 'actual_rdm' is provided, overrides the matrix to plot.
+    fix_range has no effect, just there for compatibility with plot_repr_corr.
     """
-    if actual_rdm is None:
+    if actual_mat is None:
         rdm = res['repr_dists'][snap_type]['snaps'][snap_ind]
     else:
-        rdm = actual_rdm
+        rdm = actual_mat
 
     image = util.plot_matrix_with_labels(ax, rdm, labels, colorbar=colorbar, tick_fontsize=tick_fontsize, bipolar=False)
 
@@ -293,7 +408,7 @@ def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None,
     return image
 
 
-def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
+def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None, fix_range=True,
                    colorbar=True, actual_mat=None, tick_fontsize='x-small'):
     """
     Plot a matrix of the correlation between input representations at a particular epoch.
@@ -304,8 +419,10 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None,
     else:
         mat = actual_mat
         
+    max_val = 1.0 if fix_range else None
+        
     image = util.plot_matrix_with_labels(ax, mat, labels, colorbar=colorbar, tick_fontsize=tick_fontsize,
-                                         bipolar=True, max_val=1.0)
+                                         bipolar=True, max_val=max_val)
     
     # domain dividers
     n_domains = res['net_params']['n_train_domains']

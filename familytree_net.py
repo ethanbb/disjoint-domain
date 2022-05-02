@@ -209,7 +209,7 @@ class FamilyTreeNet(nn.Module):
                                            threshold=threshold, tree_mask=tree_mask)
         return torch.sum(weights * b_correct.to(self.torchfp), dim=1)
     
-    def evaluate_input_set(self, input_inds, threshold=0.2, output_stats_units=slice(None)):
+    def evaluate_input_set(self, input_inds, threshold=0.2, all_masked=False):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs"""
         self.eval()
         with torch.no_grad():
@@ -222,12 +222,12 @@ class FamilyTreeNet(nn.Module):
                 masked_targets = targets * self.p2_tree_mask[input_inds]
                 loss = self.criterion(masked_outputs, masked_targets) / len(input_inds)
                 
-            outputs_correct = self.b_outputs_correct(outputs, input_inds, threshold=threshold)
+            outputs_correct = self.b_outputs_correct(outputs, input_inds, threshold=threshold, tree_mask=all_masked)
             acc = torch.mean(outputs_correct.to(self.torchfp)).item()
             wacc = torch.mean(self.weighted_acc(outputs, input_inds,
-                                                threshold=threshold)).item()
+                                                threshold=threshold, tree_mask=all_masked)).item()
             wacc_loose = torch.mean(self.weighted_acc(outputs, input_inds,
-                                                      threshold=0.5)).item()
+                                                      threshold=0.5, tree_mask=all_masked)).item()
             wacc_loose_masked = torch.mean(self.weighted_acc(outputs, input_inds,
                                                              threshold=0.5,
                                                              tree_mask=True)).item()
@@ -356,7 +356,7 @@ class FamilyTreeNet(nn.Module):
             
             order = util.permute(included_inds)
             self.train_epoch(order, optimizer, batch_size)
-            perfect = self.evaluate_input_set(targets, threshold=0.5)[3]
+            perfect = self.evaluate_input_set(targets, threshold=0.5, all_masked=not self.include_cross_tree_loss)[3]
 
             if perfect >= thresh:
                 break
@@ -500,8 +500,6 @@ class FamilyTreeNet(nn.Module):
                 reports['weighted_acc_loose'][k_report] = mean_wacc_loose
                 reports['weighted_acc_loose_indomain'][k_report] = mean_wacc_loose_masked
                 reports['frac_perfect'][k_report] = frac_perf
-
-                # mean_out_test = self.evaluate_input_set(holdout_inds, output_stats_units=np.setdiff1d(range(self.person1_units), train_p1_inds))[4]
                     
                 report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
                               f'loss = {mean_loss:7.3f}' +
@@ -574,6 +572,7 @@ def train_n_fam_nets(n=36, run_type='', net_params=None, train_params=None):
     snaps_all = []
     reports_all = []
     seeds_all = []
+    ys = []
 
     net = None
     for i in range(n):
@@ -586,6 +585,7 @@ def train_n_fam_nets(n=36, run_type='', net_params=None, train_params=None):
         seeds_all.append(net.seed)
         snaps_all.append(res['snaps'])
         reports_all.append(res['reports'])
+        ys.append(net.person2_mat.cpu().numpy())
 
         print('')
         
@@ -602,7 +602,7 @@ def train_n_fam_nets(n=36, run_type='', net_params=None, train_params=None):
         run_type += '_'
     
     save_name = f'data/familytree/{run_type}res_{dt.now():%Y-%m-%d_%H-%M-%S}.npz'
-    np.savez(save_name, snapshots=snaps, reports=reports, net_params=combined_net_params,
+    np.savez(save_name, snapshots=snaps, reports=reports, ys=ys, net_params=combined_net_params,
              train_params=combined_train_params, seeds=seeds_all)
     
     return save_name, net

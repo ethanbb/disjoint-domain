@@ -42,7 +42,7 @@ add_colorbar = util.add_colorbar
 
 def get_result_means(res_path, **result_mean_opts):
     
-    res = net_analysis.get_result_means(res_path, **result_mean_opts, extra_keys=['ys'])
+    res = net_analysis.get_result_means(res_path, **result_mean_opts)
     
     # expand any cluster info that was passed as a nullary function
     for possible_fn in ddnet.callable_net_params:

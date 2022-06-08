@@ -68,6 +68,7 @@ class DisjointDomainNet(nn.Module):
     - share_attr_units_in_domain: True to use the same attr units for each context within each domain.
     - cluster_info: String or dict specifying item similarity structure, etc. - see dd.make_attr_vecs()
     - last_domain_cluster_info: If not None, possibly different cluster_info for the last domain
+      - NEW 5/18: If this is a tuple of length N, replaces the final N domains according to the given cluster info.
     - param_init_type: How to initialize weights and biases - 'default' (PyTorch default), 'normal' or 'uniform'
     - param_init_scale: If param_init_type != 'default', std of normal distribution or 1/2 width of uniform distribution
     - fix_biases: If True, don't use trainable biases
@@ -340,7 +341,7 @@ class DisjointDomainNet(nn.Module):
         For each item in the batch, find the average of accuracy for 0s and accuracy for 1s
         (i.e. correct for unbalanced ground truth output)
         """        
-        set_attrs_per_item = torch.sum(self.y[batch_inds], dim=1, keepdim=True)
+        set_attrs_per_item = torch.sum(self.y[batch_inds] > 0, dim=1, keepdim=True)
         set_weight = 0.5 / set_attrs_per_item
         unset_weight = 0.5 / (self.n_attributes - set_attrs_per_item)
         
@@ -457,7 +458,7 @@ class DisjointDomainNet(nn.Module):
                 repr_snaps['context_preact'][self.train_ctx_inds] = ctx_preact
                 repr_snaps['context'][self.train_ctx_inds] = self.act_fn(ctx_preact)
             
-            # first get the rest of the layers for all inputs
+            # get the rest of the layers for all inputs
             snaps['hidden_preact'] = torch.full((self.n_inputs, self.hidden_units), np.nan)
             snaps['hidden'] = snaps['hidden_preact'].clone()
             hidden_preact = self.calc_hidden_preact(self.x_item[self.train_x_inds], self.x_context[self.train_x_inds])
@@ -767,7 +768,7 @@ class DisjointDomainNet(nn.Module):
         # concatenate snapshots and move to cpu
         if len(snaps) > 0:
             snaps_cpu = {stype: np.stack([s[stype].cpu().numpy() for s in snaps])
-                         for stype in snaps[0].keys()}
+                         for stype in snaps[0]}
         else:
             snaps_cpu = {}
 

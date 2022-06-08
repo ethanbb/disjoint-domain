@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 from datetime import datetime as dt
 from copy import deepcopy
+from functools import cached_property
 
 import familytree
 import util
@@ -44,6 +45,7 @@ train_defaults = {
     'do_combo_testing': True,
     'n_holdout': 4,
     'do_tree_holdout': False,
+    'domains_to_hold_out': 0,
     'reports_per_test': 4,
     'test_thresh': 0.85,
     'test_max_epochs': 15000,
@@ -166,18 +168,48 @@ class FamilyTreeNet(nn.Module):
             self.person2_train_target = self.person2_mat
 
         self.criterion = self.loss_fn(reduction=self.loss_reduction)
+        self.train_x_inds = None  # to be set when training occurs
         
-    def forward(self, person1, rel):
-        person1_repr_act = self.act_fn(self.person1_to_repr(person1))
-        rel_repr_act = self.act_fn(self.rel_to_repr(rel))
-        repr_act = torch.cat((person1_repr_act, rel_repr_act), dim=1)
-        hidden_act = self.act_fn(self.repr_to_hidden(repr_act))
+    @cached_property
+    def train_p1_inds(self):
+        if self.train_x_inds is None:
+            return None
+        with torch.no_grad():
+            return np.flatnonzero(self.person1_mat[self.train_x_inds].any(dim=0).cpu().numpy())
+        
+    @cached_property
+    def train_rel_inds(self):
+        if self.train_x_inds is None:
+            return None
+        with torch.no_grad():
+            return np.flatnonzero(self.rel_mat[self.train_x_inds].any(dim=0).cpu().numpy())
+        
+    # --- feedforward computation methods --- #
+    def calc_p1_repr_preact(self, person1):
+        return self.person1_to_repr(person1)
+    
+    def calc_rel_repr_preact(self, rel):
+        return self.rel_to_repr(rel)
+    
+    def calc_hidden_preact(self, person1, rel):
+        p1_repr = self.act_fn(self.calc_p1_repr_preact(person1))
+        rel_repr = self.act_fn(self.calc_rel_repr_preact(rel))
+        repr_full = torch.cat((p1_repr, rel_repr), dim=1)
+        return self.repr_to_hidden(repr_full)
+    
+    def calc_output_preact(self, person1, rel):
+        hidden_act = self.act_fn(self.calc_hidden_preact(person1, rel))
 
         if self.use_preoutput:
             preoutput_act = self.act_fn(self.hidden_to_preoutput(hidden_act))
-            return self.act_fn(self.preoutput_to_person2(preoutput_act))
+            return self.preoutput_to_person2(preoutput_act)
         else:
-            return self.act_fn(self.hidden_to_person2(hidden_act))
+            return self.hidden_to_person2(hidden_act)
+        
+    def forward(self, person1, rel):
+        return self.act_fn(self.calc_output_preact(person1, rel))
+        
+    # --- training and evaluation methods --- #
     
     def b_outputs_correct(self, outputs, batch_inds, threshold=0.2, tree_mask=False):
         """
@@ -252,25 +284,24 @@ class FamilyTreeNet(nn.Module):
             loss.backward()
             optimizer.step()
     
-    def prepare_tree_holdout(self):
+    def prepare_tree_holdout(self, n=1):
         """Prepare for holding out the last tree and testing how many epochs it takes to generalize"""
-        assert self.n_trees > 1, "Can't hold out a tree when there's only one tree"
-        print(f'Holding out {self.trees[-1]} tree')
-        last_tree = self.each_tree[-1]
-        last_tree_n_people = last_tree.size
-        input_is_last_tree = torch.any(self.person1_mat[:, -last_tree_n_people:], dim=1)
+        n_train_trees = self.n_trees - n
+        assert n_train_trees > 0, f"Can't hold out {n} trees if there are less than {n+1} trees total"
+        tree_names = [f'{chr(ord("A") + n)} ({tree_type})' for n, tree_type in zip(range(self.n_trees), self.trees)]
+        held_out_trees = tree_names[n_train_trees:]
+        print(f'Holding out tree(s): {", ".join(held_out_trees)}')
         
-        train_inds = torch.squeeze(torch.nonzero(~input_is_last_tree))
-        test_inds = torch.squeeze(torch.nonzero(input_is_last_tree))
+        tree_sizes = torch.tensor([tree.size for tree in self.each_tree])
+        cum_tree_sizes = torch.cumsum(tree_sizes, dim=0)
+        p1_inds = torch.nonzero(self.person1_mat, as_tuple=True)[1]
+        k_tree = torch.sum(p1_inds[np.newaxis, :] >= cum_tree_sizes[:, np.newaxis], dim=0)
+        k_tree_rel = k_tree - n_train_trees
+        train_inds = torch.squeeze(torch.nonzero(k_tree_rel < 0)).cpu().numpy()
+        test_inds = {tname: torch.squeeze(torch.nonzero(k_tree_rel == kt)).cpu().numpy()
+                     for kt, tname in enumerate(held_out_trees)}
         
-        train_p1_inds = np.arange(self.person1_units - last_tree_n_people)
-        if self.share_rel_units:
-            train_rel_inds = np.arange(self.rel_units)  # use all, they're shared
-        else:
-            rel_is_last_tree = torch.any(self.rel_mat[-len(test_inds):, :], dim=0)
-            train_rel_inds = torch.squeeze(torch.nonzero(~rel_is_last_tree)).cpu().numpy()
-        
-        return train_p1_inds, train_rel_inds, train_inds.cpu().numpy(), test_inds.cpu().numpy()
+        return train_inds, test_inds
 
     def prepare_holdout(self, n_holdout):
         """
@@ -316,23 +347,6 @@ class FamilyTreeNet(nn.Module):
         train_inds = np.setdiff1d(range(self.n_inputs), holdout_inds)
         return train_inds, holdout_inds
     
-    def prepare_snapshots(self, snap_freq, num_epochs, include_final_eval, **_extra):
-        """Make tensors to hold representation snapshots"""
-        total_epochs = sum(num_epochs)
-        snap_epochs = util.calc_snap_epochs(snap_freq, total_epochs, 'lin', include_final_eval)
-        epoch_digits = len(str(snap_epochs[-1]))
-        n_snaps = len(snap_epochs)
-        
-        snaps = {
-            'person1_repr_preact': torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan),
-            'person1_repr': torch.full((n_snaps, self.person1_units, self.person1_repr_units), np.nan),
-            'person1_hidden': torch.full((n_snaps, self.person1_units, self.hidden_units), np.nan),
-            'relation_repr': torch.full((n_snaps, self.rel_units, self.rel_repr_units), np.nan),
-            'relation_hidden': torch.full((n_snaps, self.rel_units, self.hidden_units), np.nan)
-        }
-        
-        return snap_epochs, epoch_digits, snaps
-    
     def generalize_test(self, batch_size, included_inds, targets, max_epochs, thresh,
                         change_epochs, optim_args):
         """
@@ -369,6 +383,72 @@ class FamilyTreeNet(nn.Module):
         etg_string = '= ' + str(epochs + 1) if epochs < max_epochs else '> ' + str(max_epochs)
         return epochs, etg_string
     
+    def take_snapshots(self):
+        """
+        Return a dict of the activations at each layer, before and after nonlinearity, both unreduced over all inputs
+        and averaged over all inputs with each person1 and relationship present.
+        """
+        def get_snap_means(unreduced_snapshot):
+            p1_mean = torch.full((self.person1_units, unreduced_snapshot.shape[1]), np.nan)
+            rel_mean = torch.full((self.rel_units, unreduced_snapshot.shape[1]), np.nan)
+            
+            for k_p1 in self.train_p1_inds:
+                p1_mean[k_p1] = torch.mean(unreduced_snapshot[self.person1_mat[:, k_p1] > 0], dim=0)
+            
+            for k_rel in self.train_rel_inds:
+                rel_mean[k_rel] = torch.mean(unreduced_snapshot[self.rel_mat[:, k_rel] > 0], dim=0)
+            
+            return p1_mean, rel_mean
+        
+        repr_snaps = {}  # those that don't need to be averaged over p1 and/or rels.
+        snaps = {}
+        people_input = torch.eye(self.person1_units, device=self.device)[self.train_p1_inds]
+        rels_input = torch.eye(self.rel_units, device=self.device)[self.train_rel_inds]
+        
+        self.eval()
+        with torch.no_grad():
+            repr_snaps['person1_repr_preact'] = torch.full((self.person1_units, self.person1_repr_units), np.nan)
+            repr_snaps['person1_repr'] = repr_snaps['person1_repr_preact'].clone()
+            p1_preact = self.calc_p1_repr_preact(people_input[self.train_p1_inds])
+            repr_snaps['person1_repr_preact'][self.train_p1_inds] = p1_preact
+            repr_snaps['person1_repr'][self.train_p1_inds] = self.act_fn(p1_preact)
+                
+            repr_snaps['relation_repr_preact'] = torch.full((self.rel_units, self.rel_repr_units), np.nan)
+            repr_snaps['relation_repr'] = repr_snaps['relation_repr_preact'].clone()
+            rel_preact = self.calc_rel_repr_preact(rels_input[self.train_rel_inds])
+            repr_snaps['relation_repr_preact'][self.train_rel_inds] = rel_preact
+            repr_snaps['relation_repr'][self.train_rel_inds] = self.act_fn(rel_preact)
+            
+            # get the rest of the layers for all inputs
+            snaps['hidden_preact'] = torch.full((self.n_inputs, self.hidden_units), np.nan)
+            snaps['hidden'] = snaps['hidden_preact'].clone()
+            hidden_preact = self.calc_hidden_preact(self.person1_mat[self.train_x_inds], self.rel_mat[self.train_x_inds])
+            snaps['hidden_preact'][self.train_x_inds] = hidden_preact
+            snaps['hidden'][self.train_x_inds] = self.act_fn(hidden_preact)
+            
+            if self.use_preoutput:
+                snaps['preoutput_preact'] = torch.full((self.n_inputs, self.preoutput_units), np.nan)
+                snaps['preoutput'] = snaps['preoutput_preact'].clone()
+                preoutput_preact = self.hidden_to_preoutput(self.act_fn(hidden_preact))
+                snaps['preoutput_preact'][self.train_x_inds] = preoutput_preact
+                snaps['preoutput'][self.train_x_inds] = self.act_fn(preoutput_preact)
+            
+            snaps['output_preact'] = torch.full((self.n_inputs, self.person2_units), np.nan)
+            snaps['output'] = snaps['output_preact'].clone()
+            output_preact = self.calc_output_preact(self.person1_mat[self.train_x_inds], self.rel_mat[self.train_x_inds])
+            snaps['output_preact'][self.train_x_inds] = output_preact
+            snaps['output'][self.train_x_inds] = self.act_fn(output_preact)
+            
+            # get the versions averaged over p1 and relations
+            mean_snaps = {}
+            for key, snap in snaps.items():
+                mean_snaps['person1_' + key], mean_snaps['relation_' + key] = get_snap_means(snap)
+            snaps.update(mean_snaps)
+            
+        snaps.update(repr_snaps)
+        return snaps           
+    
+    
     def do_training(self, **train_params):
         """
         Do the training!
@@ -380,28 +460,28 @@ class FamilyTreeNet(nn.Module):
         """
 
         # Merge default params with overrides
-        train_params = {**train_defaults, **train_params}
+        p = {**train_defaults, **train_params}
             
-        num_epochs = train_params['num_epochs']
+        num_epochs = p['num_epochs']
         if isinstance(num_epochs, tuple):
             n_stages = len(num_epochs)
         else:
             n_stages = 1
             num_epochs = (num_epochs,)
 
-        lr = train_params['lr']
+        lr = p['lr']
         if isinstance(lr, tuple):
             assert len(lr) == n_stages, 'Wrong number of lr values for number of stages'
         else:
             lr = tuple(lr for _ in range(n_stages))
 
-        momentum = train_params['momentum']
+        momentum = p['momentum']
         if isinstance(momentum, tuple):
             assert len(momentum) == n_stages, 'Wrong number of momentum values for number of stages'
         else:
             momentum = tuple(momentum for _ in range(n_stages))
 
-        weight_decay = train_params['weight_decay']
+        weight_decay = p['weight_decay']
         if isinstance(weight_decay, tuple):
             assert len(weight_decay) == n_stages, 'Wrong number of weight decay values for number of stages'
         else:
@@ -420,40 +500,56 @@ class FamilyTreeNet(nn.Module):
 
         optimizer = torch.optim.SGD(self.parameters(), **train_optim_args[0])
         
-        # Choose the hold-out people/relationships from the English tree
-        train_p1_inds = np.arange(self.person1_units)
-        train_rel_inds = np.arange(self.rel_units)
-        if train_params['do_combo_testing']:
-            assert not train_params['do_tree_holdout'], "Can't do both combo testing and tree holdout"
-            train_inds, holdout_inds = self.prepare_holdout(train_params['n_holdout'])
-        elif train_params['do_tree_holdout']:
-            train_p1_inds, train_rel_inds, train_inds, holdout_inds = self.prepare_tree_holdout()
+        # Make tree/domain holdout options consistent
+        if p['domains_to_hold_out'] > 0:
+            p['do_tree_holdout'] = True
+        elif p['do_tree_holdout']:
+            if 'domains_to_hold_out' in train_params:  # case where domains_to_hold_out = 0 was explicitly specified
+                raise ValueError('Must hold out > 0 trees if doing tree holdout')
+            p['domains_to_hold_out'] = 1
+        
+        # Train and testing input indices
+        if p['do_combo_testing']:
+            assert not p['do_tree_holdout'], "Can't do both combo testing and tree holdout"
+            self.train_x_inds, holdout_inds = self.prepare_holdout(p['n_holdout'])
+        elif p['do_tree_holdout']:
+            self.train_x_inds, holdout_ind_dict = self.prepare_tree_holdout(n=p['domains_to_hold_out'])
         else:
-            train_inds = np.arange(self.n_inputs)
+            self.train_x_inds = np.arange(self.n_inputs)
             holdout_inds = np.array([])
-                    
-        # Prepare snapshots
-        snap_epochs, epoch_digits, snaps = self.prepare_snapshots(**train_params)
+            
+        # Reset cached properties, if necessary
+        for attr_name in ['train_p1_inds', 'train_rel_inds']:
+            if hasattr(self, attr_name):
+                delattr(self, attr_name)
 
         total_epochs = sum(num_epochs)
         change_epochs = list(np.cumsum(num_epochs))[:-1]
         epoch_digits = len(str(total_epochs-1))
-        etg_digits = len(str(train_params['test_max_epochs'])) + 2
-        n_report = total_epochs // train_params['report_freq'] + 1
-        n_etg = (n_report - 1) // train_params['reports_per_test'] + 1
+        etg_digits = len(str(p['test_max_epochs'])) + 2
+        n_report = total_epochs // p['report_freq'] + 1
+        n_etg = (n_report - 1) // p['reports_per_test'] + 1
         reports = {rtype: np.zeros(n_report)
                    for rtype in ['loss', 'accuracy', 'weighted_acc', 'weighted_acc_loose',
                                  'weighted_acc_loose_indomain', 'frac_perfect']}
         
-        if train_params['do_combo_testing']:
+        # Prepare snapshots
+        snap_epochs = util.calc_snap_epochs(p['snap_freq'], total_epochs, 'lin', p['include_final_eval'])
+        epoch_digits = len(str(snap_epochs[-1]))
+        snaps = []
+        
+        
+        if p['do_combo_testing']:
             for rtype in ['test_accuracy', 'test_weighted_acc',
                           'test_weighted_acc_indomain', 'test_frac_perfect']:
                 reports[rtype] = np.zeros(n_report)
 
-        if train_params['do_tree_holdout']:
+        if p['do_tree_holdout']:
             reports['new_tree_etg'] = np.zeros(n_etg, dtype=int)
+            for kt in range(1, p['domains_to_hold_out']):
+                reports[f'new_tree_etg{kt+1}'] = np.zeros(n_etg, dtype=int)
         
-        for epoch in range(total_epochs + (1 if train_params['include_final_eval'] else 0)):
+        for epoch in range(total_epochs + (1 if p['include_final_eval'] else 0)):
             if epoch in change_epochs:
                 # Move to new stage of learning
                 k_change = change_epochs.index(epoch)
@@ -463,36 +559,16 @@ class FamilyTreeNet(nn.Module):
             if epoch in snap_epochs:
                 # collect snapshots
                 k_snap = snap_epochs.index(epoch)
+                snaps.append(self.take_snapshots())
 
-                with torch.no_grad():
-                    people_input = torch.eye(self.person1_units, device=self.device)[train_p1_inds]
-                    rels_input = torch.eye(self.rel_units, device=self.device)[train_rel_inds]
-                    people_dummy = torch.zeros((len(train_rel_inds), self.person1_units), device=self.device)
-                    rels_dummy = torch.zeros((len(train_p1_inds), self.rel_units), device=self.device)
-                    
-                    p1_repr_preact_snap = self.person1_to_repr(people_input)
-                    p1_repr_snap = self.act_fn(p1_repr_preact_snap)
-                    dummy_rel_repr = self.act_fn(self.rel_to_repr(rels_dummy))
-                    combined_repr = torch.cat((p1_repr_snap, dummy_rel_repr), dim=1)
-                    p1_hidden_snap = self.act_fn(self.repr_to_hidden(combined_repr))
-                    snaps['person1_repr_preact'][k_snap][train_p1_inds] = p1_repr_preact_snap
-                    snaps['person1_repr'][k_snap][train_p1_inds] = p1_repr_snap
-                    snaps['person1_hidden'][k_snap][train_p1_inds] = p1_hidden_snap
-                    
-                    rel_repr_snap = self.act_fn(self.rel_to_repr(rels_input))
-                    dummy_person1_repr = self.act_fn(self.person1_to_repr(people_dummy))
-                    combined_repr = torch.cat((dummy_person1_repr, rel_repr_snap), dim=1)
-                    rel_hidden_snap = self.act_fn(self.repr_to_hidden(combined_repr))
-                    snaps['relation_repr'][k_snap][train_rel_inds] = rel_repr_snap
-                    snaps['relation_hidden'][k_snap][train_rel_inds] = rel_hidden_snap
             
             # report progress
-            if epoch % train_params['report_freq'] == 0:
-                k_report = epoch // train_params['report_freq']
+            if epoch % p['report_freq'] == 0:
+                k_report = epoch // p['report_freq']
                 
                 # get current performance
                 (mean_loss, mean_acc, mean_wacc, mean_wacc_loose,
-                 mean_wacc_loose_masked,  frac_perf) = self.evaluate_input_set(train_inds)
+                 mean_wacc_loose_masked,  frac_perf) = self.evaluate_input_set(self.train_x_inds)
                 
                 reports['loss'][k_report] = mean_loss
                 reports['accuracy'][k_report] = mean_acc
@@ -501,18 +577,18 @@ class FamilyTreeNet(nn.Module):
                 reports['weighted_acc_loose_indomain'][k_report] = mean_wacc_loose_masked
                 reports['frac_perfect'][k_report] = frac_perf
                     
-                report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
-                              f'loss = {mean_loss:7.3f}' +
-                              # f', accuracy = {mean_acc:.3f}' +
-                              f', weighted acc = {mean_wacc:.3f}' +
-                              f', {frac_perf*100:3.0f}% perfect (train)')
+                report_str = f'Epoch {epoch:{epoch_digits}d}: loss = {mean_loss:7.3f}'
+                if self.include_cross_tree_loss:
+                    report_str += f', weighted acc = {mean_wacc_loose:.3f}, {frac_perf*100:3.0f}% perfect (train)'
+                else:
+                    report_str += f', in-domain weighted acc = {mean_wacc_loose_masked:.3f}'
     
                 # testing
-                if train_params['do_tree_holdout'] and k_report % train_params['reports_per_test'] == 0:
-                    k_ho = k_report // train_params['reports_per_test']
+                if p['do_tree_holdout'] and k_report % p['reports_per_test'] == 0:
+                    k_ho = k_report // p['reports_per_test']
                     
                     # offset change epochs if we don't want to reset training parameters during holdout
-                    if not train_params['reset_optim_params_during_holdout']:
+                    if not p['reset_optim_params_during_holdout']:
                         test_change_epochs = [e - epoch for e in change_epochs]
                         n_changes_passed = sum(e <= 0 for e in test_change_epochs)
                         this_test_optim_args = test_optim_args[n_changes_passed:]
@@ -521,15 +597,19 @@ class FamilyTreeNet(nn.Module):
                         test_change_epochs = change_epochs
                         this_test_optim_args = test_optim_args
                     
-                    etg, etg_string = self.generalize_test(
-                        train_params['batch_size'], np.arange(self.n_inputs),
-                        holdout_inds, train_params['test_max_epochs'], train_params['test_thresh'],
-                        test_change_epochs, this_test_optim_args
-                    )
-                    reports['new_tree_etg'][k_ho] = etg
-                    report_str += f', epochs for new tree {etg_string:>{etg_digits}}'
+                    for kt, (tname, this_test_inds) in enumerate(holdout_ind_dict.items()):
+                        included_inds = np.concatenate((self.train_x_inds, this_test_inds))
+                        
+                        etg, etg_string = self.generalize_test(
+                            p['batch_size'], included_inds, this_test_inds,
+                            p['test_max_epochs'], p['test_thresh'],
+                            test_change_epochs, this_test_optim_args
+                        )
+                        report_str += f'\n\t Epochs to learn tree {tname} {etg_string:>{etg_digits}}'
+                        report_type = 'new_tree_etg' + (str(kt+1) if kt > 0 else '')
+                        reports[report_type][k_ho] = etg
                 
-                if train_params['do_combo_testing']:
+                if p['do_combo_testing']:
                     # following the paper, use a more lenient threshold (0.5) for test items
                     _, test_acc, test_wacc, _, test_wacc_masked, test_frac_perf = \
                     self.evaluate_input_set(holdout_inds, threshold=0.5)
@@ -545,10 +625,15 @@ class FamilyTreeNet(nn.Module):
             
             # do training
             if epoch < total_epochs:
-                order = util.permute(train_inds)
-                self.train_epoch(order, optimizer, train_params['batch_size'])
-                
-        snaps_cpu = {stype: s.cpu().numpy() for stype, s in snaps.items()}
+                order = util.permute(self.train_x_inds)
+                self.train_epoch(order, optimizer, p['batch_size'])
+         
+        # concatenate snapshots and move to cpu
+        if len(snaps) > 0:
+            snaps_cpu = {stype: np.stack([s[stype].cpu().numpy() for s in snaps])
+                         for stype in snaps[0]}
+        else:
+            snaps_cpu = {}
         return {'reports': reports, 'snaps': snaps_cpu}
 
     

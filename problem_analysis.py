@@ -305,9 +305,10 @@ def get_expected_attr_covar_at_epochs(item_mat, attr_mat, tau, epochs):
     return basis_and_svs_to_epected_attr_covar_at_epochs(basis_mats, svs, tau, epochs)
 
 
-def combine_single_sv_mode_group(u_group, vh_group):
+def combine_single_sv_mode_group(u_group, vh_group, keep_nd_modes=False):
     """Helper for below"""
     n_modes, n_items = vh_group.shape
+    n_attrs = u_group.shape[0]
     n_domains = n_modes
     items_per_domain = n_items // n_domains
     
@@ -329,10 +330,28 @@ def combine_single_sv_mode_group(u_group, vh_group):
     # Finally flip the ones we want to flip and sum
     u_group_flipped = u_group * multipliers[np.newaxis, :]
     vh_group_flipped = vh_group * multipliers[:, np.newaxis]
-    return np.sum(u_group_flipped, axis=1), np.sum(vh_group_flipped, axis=0)
+    
+    first_combined_mode_u = np.sum(u_group_flipped, axis=1, keepdims=True)
+    first_combined_mode_v = np.sum(vh_group_flipped, axis=0, keepdims=True)
+    if not keep_nd_modes:
+        return first_combined_mode_u, first_combined_mode_v
+    else:
+        all_combined_modes_u = np.zeros((n_attrs, n_domains))
+        all_combined_modes_u[:, 0] = first_combined_mode_u.ravel()
+        all_combined_modes_v = np.zeros((n_domains, n_items))
+        all_combined_modes_v[0, :] = first_combined_mode_v.ravel()
+        
+        for k_subtract in range(1, n_domains):
+            mult_subtract = multipliers.copy()
+            mult_subtract[k_subtract] = -multipliers[k_subtract]
+            all_combined_modes_u[:, k_subtract] = np.sum(u_group * mult_subtract[np.newaxis, :], axis=1)
+            all_combined_modes_v[k_subtract, :] = np.sum(vh_group * mult_subtract[:, np.newaxis], axis=0)
+        
+        return all_combined_modes_u, all_combined_modes_v
 
 
-def combine_sv_mode_groups_aligning_items(u, vh, n_domains=2):
+def combine_sv_mode_groups_aligning_items(u, vh, n_domains=2, 
+                                          keep_nd_modes_in_1st_group=True):
     """
     Hackily add together groups of attr and item loadings, signflipping such that
     the item loadings in the domains they most load onto are maximally "aligned." 
@@ -340,10 +359,15 @@ def combine_sv_mode_groups_aligning_items(u, vh, n_domains=2):
     u_groups = np.split(u, u.shape[1] // n_domains, axis=1)
     vh_groups = np.split(vh, vh.shape[0] // n_domains, axis=0)
     
-    combined_u = np.empty((u.shape[0], len(u_groups)))
-    combined_vh = np.empty((len(vh_groups), vh.shape[1]))
-    for k, (u_group, vh_group) in enumerate(zip(u_groups, vh_groups)):
-        combined_u[:, k], combined_vh[k, :] = combine_single_sv_mode_group(u_group, vh_group)
-        
-    return combined_u, combined_vh
+    # combined_u = np.empty((u.shape[0], len(u_groups)))
+    # combined_vh = np.empty((len(vh_groups), vh.shape[1]))
+    def combine_kth_mode_group(k, u_group, vh_group):
+        keep_nd_modes = k == 0 and keep_nd_modes_in_1st_group
+        return combine_single_sv_mode_group(u_group, vh_group, keep_nd_modes)
+    
+    combined_u, combined_vh = zip(*[combine_kth_mode_group(k, u_group, vh_group)
+                                    for k, (u_group, vh_group)
+                                    in enumerate(zip(u_groups, vh_groups))])
+    
+    return np.concatenate(combined_u, axis=1), np.concatenate(combined_vh, axis=0) 
 

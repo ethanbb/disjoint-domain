@@ -212,6 +212,17 @@ def plot_matrix_with_labels(ax, mat, labels, colorbar=True, label_cols=True,
     return image
 
 
+def add_domain_dividers(ax, mat, n_domains):
+    """Add black lines between domains of a matrix plot"""
+    rows_per_domain = mat.shape[0] // n_domains
+    cols_per_domain = mat.shape[1] // n_domains
+    for row_divider in np.arange(rows_per_domain-0.5, mat.shape[0]-0.5, rows_per_domain):
+        ax.plot(ax.get_xlim(), [row_divider, row_divider], 'k', lw=1)
+    
+    for col_divider in np.arange(cols_per_domain-0.5, mat.shape[0]-0.5, cols_per_domain):
+        ax.plot([col_divider, col_divider], ax.get_ylim(), 'k', lw=1)
+
+
 def print_svg(figure, path):
     svg_renderer = FigureCanvasSVG(figure)
     svg_renderer.print_svg(path)

@@ -151,17 +151,18 @@ def calc_effective_svs_and_residuals(training_inputs, training_y, snapshots):
     return basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots)
 
 
-def calc_paired_effective_svs_and_residuals(training_inputs, training_y, snapshots):
+def calc_paired_effective_svs_and_residuals(training_inputs, training_y, snapshots, use_extra_modes):
     io_corr_mat = pa.get_contextfree_io_corr_matrix(training_inputs, training_y)
     u, _, vh = pa.corr_mat_svd(io_corr_mat, center=False)
-    paired_u, paired_vh = pa.combine_sv_mode_groups_aligning_items(u, vh, n_domains=2)
+    paired_u, paired_vh = pa.combine_sv_mode_groups_aligning_items(u, vh, n_domains=2, keep_nd_modes_in_1st_group=use_extra_modes)
     basis_mats = np.einsum('ij,jk->jik', paired_u, paired_vh)
     return basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots)
         
 
 def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
                      compute_full_rdms=False, include_individual_corr_mats=False, include_individual_rdms=False,
-                     extra_keys=None, include_rdms=False, effective_sv_snaps=(), pair_effective_sv_snaps=()):
+                     extra_keys=None, include_rdms=False, effective_sv_snaps=(), pair_effective_sv_snaps=(),
+                    first_group_extra_sv_modes=False):
     """
     Get dict of data (meaned over runs) from saved file
     If subsample_snaps is > 1, use only every nth snapshot
@@ -217,12 +218,21 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
     sv_snap_paired = np.repeat([False, True], [len(effective_sv_snaps), len(pair_effective_sv_snaps)])
     for sv_snap_type, paired in zip(effective_sv_snaps + pair_effective_sv_snaps, sv_snap_paired):
         paired_tag = 'paired_' if paired else ''
-        calc_fn = calc_paired_effective_svs_and_residuals if paired else calc_effective_svs_and_residuals
+        n_inputs = n_modes = training_inputs.shape[1]
+        
+        if paired:
+            if first_group_extra_sv_modes:
+                n_modes = n_modes // 2 + nd_train - 1
+                def calc_fn(train_inputs, train_y, snaps):
+                    return calc_paired_effective_svs_and_residuals(train_inputs, train_y, snaps, True)
+            else:
+                n_modes = n_modes // 2
+                def calc_fun(train_inputs, train_y, snaps):
+                    return calc_paired_effective_svs_and_residuals(train_inputs, train_y, snaps, False)
+        else:
+            calc_fn = calc_effective_svs_and_residuals
         
         base_snaps = snaps[sv_snap_type]
-        n_inputs = n_modes = training_inputs.shape[1]
-        if paired:
-            n_modes //= 2
         n_outputs = training_ys.shape[2]
         n_runs, n_epochs = base_snaps.shape[:2]
         
@@ -324,13 +334,18 @@ def load_nested_runs_w_cache(res_path_dict, res_path_cache, res_data_cache,
             
     for key, val in res_path_dict.items():
         if isinstance(val, dict):
-            if 'inherit_from' in val:  # inherit from other loaded dataset, switching out the held-out domain 
-                loaded_data[key] = deepcopy(loaded_data[val['inherit_from']])
-                etg_key = f'etg_domain{val["etg_domain"]}'
-                for report_key in ['reports', 'report_cis', 'report_meds', 'report_med_cis']:
-                    if report_key in loaded_data[key]:
-                        assert etg_key in loaded_data[key][report_key], f'Cannot inherit from {val["inherit_from"]} - held-out domain {val["etg_domain"]} missing'
-                        loaded_data[key][report_key]['etg_domain'] = loaded_data[key][report_key][etg_key]    
+            if 'inherit_from' in val:  # inherit from other loaded dataset, switching out the held-out domain
+                base_run = val['inherit_from']
+                loaded_data[key] = deepcopy(loaded_data[base_run])
+                
+                for etg_key_base in ['etg_domain', 'new_tree_etg']:
+                    if etg_key_base in val:
+                        ho_num = val[etg_key_base]
+                        etg_key = f'{etg_key_base}{ho_num}'
+                        for report_key in ['reports', 'report_cis', 'report_meds', 'report_med_cis']:
+                            if report_key in loaded_data[key]:
+                                assert etg_key in loaded_data[key][report_key], f'Cannot inherit from {base_run} - held-out domain {ho_num} missing'
+                                loaded_data[key][report_key][etg_key_base] = loaded_data[key][report_key][etg_key]    
             else:  # recurse
                 sub_res_path_cache = res_path_cache[key] if key in res_path_cache else None
                 sub_res_data_cache = res_data_cache[key] if key in res_data_cache else None
@@ -399,6 +414,7 @@ def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None, fix_range=F
         rdm = actual_mat
 
     image = util.plot_matrix_with_labels(ax, rdm, labels, colorbar=colorbar, tick_fontsize=tick_fontsize, bipolar=False)
+    util.add_domain_dividers(ax, rdm, res['net_params']['n_train_domains'])
 
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
@@ -422,15 +438,9 @@ def plot_repr_corr(ax, res, snap_type, snap_ind, labels, title_addon=None, fix_r
     max_val = 1.0 if fix_range else None
         
     image = util.plot_matrix_with_labels(ax, mat, labels, colorbar=colorbar, tick_fontsize=tick_fontsize,
-                                         bipolar=True, max_val=max_val)
-    
-    # domain dividers
-    n_domains = res['net_params']['n_train_domains']
-    items_per_domain = mat.shape[0] // n_domains
-    for divider_pt in np.arange(items_per_domain-0.5, mat.shape[0]-0.5, items_per_domain):
-        ax.plot(ax.get_xlim(), [divider_pt, divider_pt], 'k', lw=1)
-        ax.plot([divider_pt, divider_pt], ax.get_ylim(), 'k', lw=1)
-    
+                                         bipolar=True, max_val=max_val)    
+    util.add_domain_dividers(ax, mat, res['net_params']['n_train_domains'])
+
     title = f'Epoch {res["snap_epochs"][snap_ind]}'
     if title_addon is not None:
         title += f'\n({title_addon})'

@@ -1,10 +1,11 @@
 import numpy as np
-from scipy.linalg import block_diag
+from scipy.linalg import block_diag, svd
 from scipy.cluster import hierarchy
 from scipy.spatial import distance
 import matplotlib.pyplot as plt
 import torch
 from typing import Dict, Any
+import re
 
 import util
 import problem_analysis as pa
@@ -320,13 +321,14 @@ def _make_eq_freq_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
 
 
 def _make_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                             dist_accel=1, dist_offset=0, **_extra):
+                             dist_accel=1, dist_offset=0, organized=True, **_extra):
     """
     Make a set of attribute vectors to implement the "ordering" structure as depicted in
     Figure 9 of Saxe et al., 2019.
     'dist_accel' is the amount by which the number of unique attributes assigned to each item
     increases as we iterate through the items.
     'dist_offset' is the extra number of unique attributes assigned to each item.
+    If 'organized' is false, shuffles the attributes of each context independently.
     """
     n_accel_attrs = dist_accel * ITEMS_PER_DOMAIN * (ITEMS_PER_DOMAIN-1) // 2
     n_offset_attrs = dist_offset * ITEMS_PER_DOMAIN
@@ -349,15 +351,20 @@ def _make_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_it
         attr_template[i, accel_offset:accel_offset + i*dist_accel] = 1
         accel_offset += i*dist_accel
     
-    return [attr_template.copy() for _ in range(ctx_per_domain)]
+    attr_vecs = [attr_template.copy() for _ in range(ctx_per_domain)]
+    if not organized:
+        attr_vecs = [av[:, torch.randperm(attrs_per_context, device='cpu')] for av in attr_vecs]
+    
+    return attr_vecs
 
 
 def _make_saxe_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                                  n_set_step=1, **_extra):
+                                  n_set_step=1, organized=True, **_extra):
     """
     Make "ordering" attribute vectors the way Saxe et al. do it, as in equation S63 in the supplement.
     This method treats 'attrs_set_per_item' as a mean, but each item will have a different # of set attributes.
     2022-04-27: changed so that attrs_set_per_item is the mean rather than the maximum.
+    If 'organized' is false, shuffles the attributes of each context independently.
     """
     n_set_range = n_set_step * (ITEMS_PER_DOMAIN-1)
     max_n_set = attrs_set_per_item + n_set_range // 2
@@ -370,7 +377,11 @@ def _make_saxe_ordering_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_p
     for n_set, row in zip(each_n_set, attr_template):
         row[:n_set] = 1
         
-    return [attr_template.copy() for _ in range(ctx_per_domain)]
+    attr_vecs = [attr_template.copy() for _ in range(ctx_per_domain)]
+    if not organized:
+        attr_vecs = [av[:, torch.randperm(attrs_per_context, device='cpu')] for av in attr_vecs]
+    
+    return attr_vecs
                                   
 
 def _shuffle_attr_vec_mat(attr_vecs):
@@ -453,6 +464,40 @@ def _resample_attr_vec_mat(attr_vecs, item_weights=None):
     return new_attr_vecs.numpy()
 
 
+def _scramble_attr_vec_mat(attr_vecs):
+    """
+    Like _resample_attr_vec_mat with all equal weights, except that it
+    does not care about keeping the same # of attributes per item.
+    In other words, it just shuffles the items for each attribute.
+    """
+    attr_freqs = np.sum(attr_vecs, axis=0)
+    nonuniform_attr_inds = np.flatnonzero((attr_freqs > 0) & (attr_freqs < ITEMS_PER_DOMAIN))
+    attr_vec_tensor = torch.from_numpy(attr_vecs)
+    
+    for ind in nonuniform_attr_inds:
+        perm = torch.randperm(ITEMS_PER_DOMAIN, device='cpu')
+        attr_vec_tensor[:, ind] = attr_vec_tensor[perm, ind]
+    
+    return attr_vecs
+
+
+def _scramble_attr_vecs_lengthwise(attr_vecs):
+    n_attrs = attr_vecs.shape[1]
+    for i in range(len(attr_vecs)):
+        attr_vecs[i, :] = attr_vecs[i, torch.randperm(n_attrs, device='cpu')]
+    
+    return attr_vecs
+
+
+def _take_n_svd_modes_of_attr_vecs(attr_vecs, n_modes):
+    u, s, vd = svd(attr_vecs, full_matrices=False)
+    n_mode_mat = u[:, :n_modes] @ np.diag(s[:n_modes]) @ vd[:n_modes, :]
+    # compress to range [0, 1]
+    n_mode_mat -= np.min(n_mode_mat)
+    n_mode_mat /= np.max(n_mode_mat)
+    return n_mode_mat
+
+
 def normalize_cluster_info(cluster_info):
     """
     Get a dict that specifies information about the attribute clusters.
@@ -462,7 +507,10 @@ def normalize_cluster_info(cluster_info):
     If input is a string, the part before the first underscore is interpreted as 'clusters'
     and each underscore-separated string after the the first (if any)
     becomes an element of the list in 'special'.
-    """   
+    """
+    if isinstance(cluster_info, list):
+        return [normalize_cluster_info(clst) for clst in cluster_info]
+        
     if isinstance(cluster_info, str):
         clusters, *special = cluster_info.split('_')
         return {'clusters': clusters, 'special': special}
@@ -510,6 +558,10 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
             raise ValueError('Invalid clusters specification')
 
     attr_vecs = attr_vec_fn(ctx_per_domain, attrs_used_per_context, attrs_set_per_item, **cluster_info)
+    
+    if match := re.search(r'(\d+)svdmode', '_'.join(cluster_info['special'])):
+        n_modes = int(match.group(1))
+        attr_vecs = [_take_n_svd_modes_of_attr_vecs(mat, n_modes) for mat in attr_vecs]
 
     # special case for shuffled attribute-item assignments keeping same mean
     # attr frequency for each item
@@ -523,6 +575,12 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
         except KeyError:
             item_weights = None
         attr_vecs = [_resample_attr_vec_mat(mat, item_weights) for mat in attr_vecs]
+        
+    if 'scramble' in cluster_info['special']:
+        attr_vecs = [_scramble_attr_vec_mat(mat) for mat in attr_vecs]
+        
+    if 'scramble-attrs' in cluster_info['special']:
+        attr_vecs = [_scramble_attr_vecs_lengthwise(mat) for mat in attr_vecs]
         
     if 'item_permutation' in cluster_info:
         attr_vecs = [mat[cluster_info['item_permutation'], :] for mat in attr_vecs]
@@ -558,10 +616,12 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, 
         context_mat = block_diag(*[context_mat_1 for _ in range(n_domains)])
 
     if last_domain_cluster_info is None:
-        last_domain_cluster_info = cluster_info
-        last_is_same = True
-    else:
-        last_is_same = False
+        last_domain_cluster_info = ()
+    elif not isinstance(last_domain_cluster_info, tuple):
+        # have to use tuple to distinguish from different clusters in different domains (list)
+        last_domain_cluster_info = (last_domain_cluster_info,)
+    
+    n_last = len(last_domain_cluster_info)
 
     if share_attr_units_in_domain:
         def make_domain_attrs(attrs_per_ctx):
@@ -571,22 +631,25 @@ def make_io_mats(ctx_per_domain=4, attrs_per_context=50, attrs_set_per_item=25, 
             return block_diag(*attrs_per_ctx)
 
     if repeat_attrs_over_domains:
-        domain_attr_list = make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                          attrs_set_per_item, cluster_info, padding_attrs)
-        if last_is_same:
-            attr_mat = block_diag(*([make_domain_attrs(domain_attr_list)] * n_domains))
-        else:
-            domain_attr_list_last = make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                                   attrs_set_per_item, last_domain_cluster_info, padding_attrs)
-            attr_mat = block_diag(*([make_domain_attrs(domain_attr_list)] * (n_domains - 1) +
-                                    [make_domain_attrs(domain_attr_list_last)]))
+        uniform_attr_list = make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                          attrs_set_per_item, cluster_info, padding_attrs)     
+        uniform_attr_mats = [make_domain_attrs(uniform_attr_list)] * (n_domains - n_last)
+        
+        last_attr_lists = [make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                          attrs_set_per_item, ifo, padding_attrs)
+                           for ifo in last_domain_cluster_info]
+        last_attr_mats = [make_domain_attrs(attr_list) for attr_list in last_attr_lists]
+        
+        attr_mat = block_diag(*uniform_attr_mats, *last_attr_mats)
+
     else:
         # New behavior: generate a new set of attr vecs for each domain.
         domain_attr_list = [make_attr_vecs(ctx_per_domain, attrs_per_context,
                                            attrs_set_per_item, cluster_info, padding_attrs)
-                            for _ in range(n_domains - 1)]
-        domain_attr_list.append(make_attr_vecs(ctx_per_domain, attrs_per_context,
-                                               attrs_set_per_item, last_domain_cluster_info, padding_attrs))
+                            for _ in range(n_domains - n_last)]
+        domain_attr_list.extend([make_attr_vecs(ctx_per_domain, attrs_per_context,
+                                                attrs_set_per_item, ifo, padding_attrs)
+                                 for ifo in last_domain_cluster_info])
         attr_mat = block_diag(*[make_domain_attrs(attrs) for attrs in domain_attr_list])
 
     return item_mat, context_mat, attr_mat
@@ -698,25 +761,32 @@ def get_items(train_only=False, n_domains=4, n_train_domains=None,
               cluster_info='4-2-2', last_domain_cluster_info=None,
               device=None, **_extra):
     """Get item tensors (without repetitions) and their corresponding names"""
-    if isinstance(cluster_info, list):
-        # Can't assign symbols because the clusters vary over contexts
-        cluster_info = '8'
+    if last_domain_cluster_info is None:
+        last_domain_cluster_info = ()
+    elif not isinstance(last_domain_cluster_info, tuple):
+        last_domain_cluster_info = (last_domain_cluster_info,)
         
-    if isinstance(last_domain_cluster_info, list):
-        last_domain_cluster_info = '8'
-    
-    if train_only and n_train_domains is not None and n_train_domains < n_domains:
-        n_domains = n_train_domains
-        last_domain_cluster_info = None  # don't use b/c the last domain isn't present here.
+    n_last = len(last_domain_cluster_info)
+    n_prelast = n_domains - n_last
     
     cluster_info = normalize_cluster_info(cluster_info)
-    last_domain_cluster_info = (cluster_info if last_domain_cluster_info is None
-                                else normalize_cluster_info(last_domain_cluster_info))
+    last_domain_cluster_info = [normalize_cluster_info(ldci) for ldci in last_domain_cluster_info]
+    
+    if isinstance(cluster_info, list):
+        # Can't assign symbols because the clusters vary over contexts
+        cluster_info = {'clusters': '8'}
+        
+    for i, ldci in enumerate(last_domain_cluster_info):
+        if isinstance(ldci, list):
+            last_domain_cluster_info[i] = {'clusters': '8'}
+    
+    if train_only and n_train_domains is not None:
+        n_domains = n_train_domains
 
     items = torch.eye(ITEMS_PER_DOMAIN * n_domains, device=device)
     all_clusters = [cluster_info['clusters']] * n_domains
-    if last_domain_cluster_info is not None:
-        all_clusters[-1] = last_domain_cluster_info['clusters']
+    for i, ldci in zip(range(n_prelast, n_domains), last_domain_cluster_info):
+        all_clusters[i] = ldci['clusters']
 
     item_names = [domain_name(d) + str(n + 1) + item_group_symbol(n, clst)
                   for d, clst in enumerate(all_clusters)

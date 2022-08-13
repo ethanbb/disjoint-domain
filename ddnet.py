@@ -37,7 +37,9 @@ train_defaults = {
     'scheduler': None,
     'holdout_testing': 'none',
     'domains_to_hold_out': 0,
+    'train_held_out_only': False,
     'reports_per_test': 4,
+    'test_criterion': 'weighted_acc_loose',
     'test_thresh': 0.97,
     'test_max_epochs': 10000,
     'do_combo_testing': False,
@@ -356,25 +358,26 @@ class DisjointDomainNet(nn.Module):
     def evaluate_input_set(self, input_inds, all_masked=False):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs (e.g. train or test)"""
         self.eval()
+        results = {}
+        
         with torch.no_grad():
             outputs = self(self.x_item[input_inds], self.x_context[input_inds])
             if self.include_cross_domain_loss:
-                loss = self.criterion(outputs, self.y[input_inds]) / len(input_inds)
+                results['loss'] = self.criterion(outputs, self.y[input_inds]) / len(input_inds)
             else:
                 masked_outputs = outputs * self.y_domain_mask[input_inds]
                 masked_targets = self.y[input_inds] * self.y_domain_mask[input_inds]
-                loss = self.criterion(masked_outputs, masked_targets) / len(input_inds)
+                results['loss'] = self.criterion(masked_outputs, masked_targets) / len(input_inds)
                 
-            acc = torch.mean(self.b_outputs_correct(outputs, input_inds)).item()
-            wacc = torch.mean(self.weighted_acc(outputs, input_inds, all_masked)).item()
-            wacc_loose = torch.mean(self.weighted_acc_loose(outputs, input_inds, all_masked)).item()\
+            results['accuracy'] = torch.mean(self.b_outputs_correct(outputs, input_inds)).item()
+            results['weighted_acc'] = torch.mean(self.weighted_acc(outputs, input_inds, all_masked)).item()
+            results['weighted_acc_loose'] = torch.mean(self.weighted_acc_loose(outputs, input_inds, all_masked)).item()
             
             if not all_masked:
-                wacc_loose_masked = torch.mean(self.weighted_acc_loose(outputs, input_inds, True)).item()
-                return loss, acc, wacc, wacc_loose, wacc_loose_masked
-            else:
-                return loss, acc, wacc, wacc_loose
+                results['weighted_acc_loose_indomain'] = torch.mean(self.weighted_acc_loose(outputs, input_inds, True)).item()
+        return results
 
+    
     def train_epoch(self, order, batch_size, optimizer):
         """Do training on batches of given size of the examples indexed by order."""
         if type(order) != torch.Tensor:
@@ -392,7 +395,7 @@ class DisjointDomainNet(nn.Module):
             loss.backward()
             optimizer.step()
             
-    def generalize_test(self, batch_size, optimizer, included_inds, targets, max_epochs=2000, thresh=0.99):
+    def generalize_test(self, batch_size, optimizer, included_inds, targets, test_crit, max_epochs=2000, thresh=0.99):
         """
         See how long it takes the network to reach accuracy threshold on target inputs,
         when training on items specified by included_inds. Then restore the parameters.
@@ -409,9 +412,10 @@ class DisjointDomainNet(nn.Module):
         while epochs < max_epochs:
             order = util.permute(included_inds)
             self.train_epoch(order, batch_size, optimizer)
-            mean_target_wacc = self.evaluate_input_set(targets, all_masked=not self.include_cross_domain_loss)[2]
+            target_stats = self.evaluate_input_set(targets, all_masked=not self.include_cross_domain_loss)
+            target_crit = target_stats[test_crit]
 
-            if mean_target_wacc >= thresh:
+            if target_crit >= thresh:
                 break
 
             epochs += 1
@@ -593,6 +597,7 @@ class DisjointDomainNet(nn.Module):
         periodically (every `reports_per_test` reports) test how many epochs are needed
         to train network up to obtaining test_thresh accuracy on the held out inputs.
         If holdout_testing is 'domain', hold out and test on the last domain.
+        If 'train_held_out_only' is True, only includes held-out domains for training at test time.
         
         Combo testing: For each domain, hold out one item/context pair. At each report time,
         test the accuracy of the network on the held-out items and contexts.
@@ -702,17 +707,13 @@ class DisjointDomainNet(nn.Module):
 
                 # get current performance
                 perf_stats = self.evaluate_input_set(self.train_x_inds)
-                mean_loss, mean_acc, mean_wacc, mean_wacc_loose, mean_wacc_loose_masked = perf_stats
 
                 report_str = (f'Epoch {epoch:{epoch_digits}d}: ' +
-                              f'loss = {mean_loss:7.3f}, ' +
-                              f'weighted acc = {mean_wacc:.3f}')
+                              f'loss = {perf_stats["loss"]:7.3f}, ' +
+                              f'weighted acc (binary) = {perf_stats["weighted_acc_loose"]:.3f}')
 
-                reports['loss'][k_report] = mean_loss
-                reports['accuracy'][k_report] = mean_acc
-                reports['weighted_acc'][k_report] = mean_wacc
-                reports['weighted_acc_loose'][k_report] = mean_wacc_loose
-                reports['weighted_acc_loose_indomain'][k_report] = mean_wacc_loose_masked
+                for stat_type, stat in perf_stats.items():
+                    reports[stat_type][k_report] = stat
 
                 if do_holdout_testing and k_report % p['reports_per_test'] == 0:
                     k_test = int(k_report // p['reports_per_test'])
@@ -720,7 +721,7 @@ class DisjointDomainNet(nn.Module):
                     # Do item and context generalize tests separately
                     if holdout_item:
                         item_etg, item_etg_string = self.generalize_test(
-                            p['batch_size'], optimizer, included_inds_item, test_x_item_inds,
+                            p['batch_size'], optimizer, included_inds_item, test_x_item_inds, test_crit=p['test_criterion'],
                             thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                         )
                         report_str += f', epochs for new item = {item_etg_string:>{etg_digits}}'
@@ -728,7 +729,7 @@ class DisjointDomainNet(nn.Module):
                     
                     if holdout_ctx:
                         ctx_etg, ctx_etg_string = self.generalize_test(
-                            p['batch_size'], optimizer, included_inds_ctx, test_x_ctx_inds,
+                            p['batch_size'], optimizer, included_inds_ctx, test_x_ctx_inds, test_crit=p['test_criterion'],
                             thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                         )
                         report_str += f', epochs for new context = {ctx_etg_string:>{etg_digits}}'
@@ -736,10 +737,13 @@ class DisjointDomainNet(nn.Module):
                         
                     if holdout_testing == 'domain':
                         for kd, (dname, this_test_inds) in enumerate(test_x_inds.items()):
-                            included_inds = np.concatenate((self.train_x_inds, this_test_inds))
+                            if p['train_held_out_only']:
+                                included_inds = this_test_inds
+                            else:
+                                included_inds = np.concatenate((self.train_x_inds, this_test_inds))
                             
                             domain_etg, domain_etg_string = self.generalize_test(
-                                p['batch_size'], optimizer, included_inds, this_test_inds,
+                                p['batch_size'], optimizer, included_inds, this_test_inds, test_crit=p['test_criterion'],
                                 thresh=p['test_thresh'], max_epochs=p['test_max_epochs']
                             )
                             report_str += f'\n\tEpochs to learn domain {dname}: {domain_etg_string:>{etg_digits}}'
@@ -748,13 +752,12 @@ class DisjointDomainNet(nn.Module):
                         
                 if p['do_combo_testing']:
                     test_perf_stats = self.evaluate_input_set(test_x_inds)
-                    test_acc, test_wacc, test_wacc_loose, test_wacc_loose_masked = test_perf_stats[1:]
                     
-                    report_str += f', test weighted acc = {test_wacc:.3f}'
-                    reports['test_accuracy'][k_report] = test_acc
-                    reports['test_weighted_acc'][k_report] = test_wacc
-                    reports['test_weighted_acc_loose'][k_report] = test_wacc_loose
-                    reports['test_weighted_acc_loose_indomain'][k_report] = test_wacc_loose_masked
+                    report_str += f', test weighted acc (binary) = {test_perf_stats["weighted_acc_loose"]:.3f}'
+                    
+                    for stat_type, stat in test_perf_stats.items():
+                        if stat_type != 'loss':
+                            reports['test_' + stat_type][k_report] = stat
                                         
                 print(report_str)
 
@@ -938,9 +941,13 @@ def restore_and_holdout_test(res_path, epochs, save_path=None,
             test_inds = np.arange(len(net.train_x_inds), net.n_inputs)
             thresh = train_params['test_thresh']
             max_epochs = train_params['test_max_epochs']
+            if 'test_criterion' in train_params:
+                test_crit = train_params['test_criterion']
+            else:
+                test_crit = train_defaults['test_criterion']
             
             etg, etg_str = net.generalize_test(
-                batch_size, optimizer, included_inds, test_inds,
+                batch_size, optimizer, included_inds, test_inds, test_crit=test_crit,
                 thresh=thresh, max_epochs=max_epochs)
             etg_net[j] = etg
             print(f'Epoch {epoch}: {etg_str} epochs to generalize')

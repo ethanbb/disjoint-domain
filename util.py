@@ -71,7 +71,7 @@ def get_mean_and_ci(series_set, alpha=0.05):
     """
     n = series_set.shape[0]
     mean = np.mean(series_set, axis=0)
-    stderr = np.std(series_set, axis=0) / np.sqrt(n)
+    stderr = np.std(series_set, ddof=1, axis=0) / np.sqrt(n)
     interval = np.stack([
         stats.t.interval(1-alpha, df=n-1, loc=m, scale=std) if std > 0 else (m, m)
         for (m, std) in zip(mean, stderr)

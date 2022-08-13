@@ -205,12 +205,53 @@ def _make_2_group_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_ite
 
 
 def _make_ring_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
-                         intragroup_dists=None, rotating_overlap=0, **_extra):
+                         rotating_block_size=5, step_size=5, organized=False, **_extra):
+    """
+    See _make_ring_attr_vecs_alt. This interface is slightly more flexible in that it can take an ITEMS_PER_DOMAIN-length
+    iterable of step sizes, allowing the distance between different pairs of items to differ.
+    """
+    assert rotating_block_size <= attrs_set_per_item, 'Not enough set attributes for rotating block size'
+    fixed_section_size = attrs_set_per_item - rotating_block_size
+    
+    if np.isscalar(step_size):
+        step_size = np.repeat(step_size, ITEMS_PER_DOMAIN)
+    else:
+        assert len(step_size) == ITEMS_PER_DOMAIN, f'Step size must either be a scalar or have length {ITEMS_PER_DOMAIN}'
+    
+    rotating_section_size = sum(step_size)
+    zero_section_size = attrs_per_context - rotating_section_size - fixed_section_size
+    assert zero_section_size >= 0, 'Not enough total attributes for desired rotating block size and step size(s)'
+    
+    attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
+    
+    for attr_mat in attrs:
+        # pick fixed set and rotating indices
+        if organized:
+            fixed_set_and_rot_inds = np.arange(fixed_section_size + rotating_section_size)
+        else:
+            fixed_set_and_rot_inds = util.choose_k_inds(attrs_per_context, fixed_section_size + rotating_section_size)
+        fixed_set_inds, rot_inds = np.split(fixed_set_and_rot_inds, [fixed_section_size])
+        
+        attr_mat[:, fixed_set_inds] = 1
+        
+        # vector of indices into rot_inds to roll
+        rot_ind_inds = np.arange(rotating_block_size)
+        for attr_vec, step in zip(attr_mat, step_size):
+            attr_vec[rot_inds[rot_ind_inds]] = 1
+            rot_ind_inds = (rot_ind_inds + step) % rotating_section_size
+        
+    return attrs
+
+
+def _make_ring_attr_vecs_alt(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                             intragroup_dists=None, rotating_overlap=0, **kwargs):
     """
     Make attribute vectors by activating a rotating set within a subset of attribute units
     (ITEMS_PER_DOMAIN * intragroup_dists[0]/2). Neighboring items (with wraparound) overlap
     by rotating_overlap within this subset, plus potentially by a fixed set of active units outside it.
     If rotating_overlap is 0, all items are equidistant.
+    This is the alternate interface that takes intragroup dists and rotating overlap instead of
+    rotating block size and step size(s).
     """
     if intragroup_dists is None:
         dist = 10
@@ -219,29 +260,14 @@ def _make_ring_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
 
     if dist % 2 != 0:
         raise ValueError('dist must be even')
-    step = dist // 2
     
-    rotating_section_size = step * ITEMS_PER_DOMAIN
+    step_size = dist // 2
     rotating_block_size = step + rotating_overlap
-    assert rotating_block_size <= attrs_set_per_item, 'Not enough set attributes for desired step and overlap'
-    fixed_section_size = attrs_set_per_item - rotating_block_size
-    zero_section_size = attrs_per_context - rotating_section_size - fixed_section_size
-    assert zero_section_size >= 0, 'Not enough total attributes for desired set # and rotation step and overlap'
     
-    attrs = [np.zeros((ITEMS_PER_DOMAIN, attrs_per_context)) for _ in range(ctx_per_domain)]
-    
-    for attr_mat in attrs:
-        # pick fixed set and rotating indices
-        fixed_set_and_rot_inds = util.choose_k_inds(attrs_per_context, fixed_section_size + rotating_section_size)
-        fixed_set_inds, rot_inds = fixed_set_and_rot_inds.split([fixed_section_size, rotating_section_size])
-
-        # set fixed indices for all items and rotating indices for each individually
-        attr_mat[:, fixed_set_inds] = 1
-        for i, attr_vec in enumerate(attr_mat):
-            rel_inds = (np.arange(rotating_block_size) + (i * step)) % rotating_section_size
-            attr_vec[rot_inds[rel_inds]] = 1
-
-    return attrs
+    # passing on kwargs protects against trying to use a contradictory combination of arguments - 
+    # python won't let an argument be specified twice.
+    return _make_ring_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
+                                rotating_block_size, step_size, **kwargs)
 
 
 def _make_eq_freq_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item,
@@ -556,6 +582,9 @@ def make_attr_vecs(ctx_per_domain, attrs_per_context, attrs_set_per_item, cluste
             }[n_clusts]
         except KeyError:
             raise ValueError('Invalid clusters specification')
+            
+        if n_clusts == 1 and ('intragroup_dists' in cluster_info or 'rotating_overlap' in cluster_info):
+            attr_vec_fn = _make_ring_attr_vecs_alt
 
     attr_vecs = attr_vec_fn(ctx_per_domain, attrs_used_per_context, attrs_set_per_item, **cluster_info)
     

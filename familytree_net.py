@@ -44,9 +44,11 @@ train_defaults = {
     'batch_size': 0,
     'do_combo_testing': True,
     'n_holdout': 4,
+    'train_held_out_only': False,
     'do_tree_holdout': False,
     'domains_to_hold_out': 0,
     'reports_per_test': 4,
+    'test_criterion': 'weighted_acc_loose',
     'test_thresh': 0.85,
     'test_max_epochs': 15000,
     'include_final_eval': True,
@@ -244,28 +246,29 @@ class FamilyTreeNet(nn.Module):
     def evaluate_input_set(self, input_inds, threshold=0.2, all_masked=False):
         """Get the loss, accuracy, weighted accuracy, etc. on a set of inputs"""
         self.eval()
+        results = {}
+        
         with torch.no_grad():
             outputs = self(self.person1_mat[input_inds], self.rel_mat[input_inds])
             targets = self.person2_train_target[input_inds]
             if self.include_cross_tree_loss:
-                loss = self.criterion(outputs, targets) / len(input_inds)
+                results['loss'] = self.criterion(outputs, targets) / len(input_inds)
             else:
                 masked_outputs = outputs * self.p2_tree_mask[input_inds]
                 masked_targets = targets * self.p2_tree_mask[input_inds]
-                loss = self.criterion(masked_outputs, masked_targets) / len(input_inds)
+                results['loss'] = self.criterion(masked_outputs, masked_targets) / len(input_inds)
                 
             outputs_correct = self.b_outputs_correct(outputs, input_inds, threshold=threshold, tree_mask=all_masked)
-            acc = torch.mean(outputs_correct.to(self.torchfp)).item()
-            wacc = torch.mean(self.weighted_acc(outputs, input_inds,
-                                                threshold=threshold, tree_mask=all_masked)).item()
-            wacc_loose = torch.mean(self.weighted_acc(outputs, input_inds,
-                                                      threshold=0.5, tree_mask=all_masked)).item()
-            wacc_loose_masked = torch.mean(self.weighted_acc(outputs, input_inds,
-                                                             threshold=0.5,
-                                                             tree_mask=True)).item()
-            perfect = torch.mean(torch.all(outputs_correct, dim=1).to(self.torchfp)).item()
-
-        return loss, acc, wacc, wacc_loose, wacc_loose_masked, perfect
+            results['accuracy'] = torch.mean(outputs_correct.to(self.torchfp)).item()
+            results['weighted_acc'] = torch.mean(self.weighted_acc(outputs, input_inds,
+                                                                   threshold=threshold, tree_mask=all_masked)).item()
+            results['weighted_acc_loose'] = torch.mean(self.weighted_acc(outputs, input_inds,
+                                                                         threshold=0.5, tree_mask=all_masked)).item()
+            results['weighted_acc_loose_indomain'] = torch.mean(self.weighted_acc(outputs, input_inds,
+                                                                                  threshold=0.5,
+                                                                                  tree_mask=True)).item()
+            results['frac_perfect'] = torch.mean(torch.all(outputs_correct, dim=1).to(self.torchfp)).item()
+        return results
             
     def train_epoch(self, order, optimizer, batch_size=0):
         """Do training on batches of given size of the examples indexed by order."""
@@ -347,7 +350,7 @@ class FamilyTreeNet(nn.Module):
         train_inds = np.setdiff1d(range(self.n_inputs), holdout_inds)
         return train_inds, holdout_inds
     
-    def generalize_test(self, batch_size, included_inds, targets, max_epochs, thresh,
+    def generalize_test(self, batch_size, included_inds, targets, test_crit, max_epochs, thresh,
                         change_epochs, optim_args):
         """
         See how long it takes the network to reach accuracy threshold on target inputs,
@@ -370,9 +373,10 @@ class FamilyTreeNet(nn.Module):
             
             order = util.permute(included_inds)
             self.train_epoch(order, optimizer, batch_size)
-            perfect = self.evaluate_input_set(targets, threshold=0.5, all_masked=not self.include_cross_tree_loss)[3]
+            target_stats = self.evaluate_input_set(targets, threshold=0.5, all_masked=not self.include_cross_tree_loss)
+            target_crit = target_stats[test_crit]
 
-            if perfect >= thresh:
+            if target_crit >= thresh:
                 break
 
             epochs += 1
@@ -457,6 +461,7 @@ class FamilyTreeNet(nn.Module):
         to use the same hyperparameter for each stage.
         The weight decay here is not scaled by the learning rate (different from PyTorch's definition).
         If batch_size == 0, do full training set batches.
+        If 'train_held_out_only' is True, only includes held-out trees for training at test time.
         """
 
         # Merge default params with overrides
@@ -567,21 +572,16 @@ class FamilyTreeNet(nn.Module):
                 k_report = epoch // p['report_freq']
                 
                 # get current performance
-                (mean_loss, mean_acc, mean_wacc, mean_wacc_loose,
-                 mean_wacc_loose_masked,  frac_perf) = self.evaluate_input_set(self.train_x_inds)
+                perf_stats = self.evaluate_input_set(self.train_x_inds)
                 
-                reports['loss'][k_report] = mean_loss
-                reports['accuracy'][k_report] = mean_acc
-                reports['weighted_acc'][k_report] = mean_wacc
-                reports['weighted_acc_loose'][k_report] = mean_wacc_loose
-                reports['weighted_acc_loose_indomain'][k_report] = mean_wacc_loose_masked
-                reports['frac_perfect'][k_report] = frac_perf
+                for stat_type, stat in perf_stats.items():
+                    reports[stat_type][k_report] = stat
                     
-                report_str = f'Epoch {epoch:{epoch_digits}d}: loss = {mean_loss:7.3f}'
+                report_str = f'Epoch {epoch:{epoch_digits}d}: loss = {perf_stats["loss"]:7.3f}'
                 if self.include_cross_tree_loss:
-                    report_str += f', weighted acc = {mean_wacc_loose:.3f}, {frac_perf*100:3.0f}% perfect (train)'
+                    report_str += f', weighted acc = {perf_stats["weighted_acc_loose"]:.3f}, {perf_stats["frac_perfect"]*100:3.0f}% perfect (train)'
                 else:
-                    report_str += f', in-domain weighted acc = {mean_wacc_loose_masked:.3f}'
+                    report_str += f', in-domain weighted acc = {perf_stats["weighted_acc_loose_indomain"]:.3f}'
     
                 # testing
                 if p['do_tree_holdout'] and k_report % p['reports_per_test'] == 0:
@@ -598,10 +598,13 @@ class FamilyTreeNet(nn.Module):
                         this_test_optim_args = test_optim_args
                     
                     for kt, (tname, this_test_inds) in enumerate(holdout_ind_dict.items()):
-                        included_inds = np.concatenate((self.train_x_inds, this_test_inds))
+                        if p['train_held_out_only']:
+                            included_inds = this_test_inds
+                        else:
+                            included_inds = np.concatenate((self.train_x_inds, this_test_inds))
                         
                         etg, etg_string = self.generalize_test(
-                            p['batch_size'], included_inds, this_test_inds,
+                            p['batch_size'], included_inds, this_test_inds, p['test_criterion'],
                             p['test_max_epochs'], p['test_thresh'],
                             test_change_epochs, this_test_optim_args
                         )
@@ -611,15 +614,13 @@ class FamilyTreeNet(nn.Module):
                 
                 if p['do_combo_testing']:
                     # following the paper, use a more lenient threshold (0.5) for test items
-                    _, test_acc, test_wacc, _, test_wacc_masked, test_frac_perf = \
-                    self.evaluate_input_set(holdout_inds, threshold=0.5)
+                    test_perf_stats = self.evaluate_input_set(holdout_inds, threshold=0.5)
+                    
+                    for stat_type, stat in test_perf_stats.items():
+                        if stat_type not in ['loss', 'weighted_acc']:  # all accuracy results are "loose"
+                            reports['test_' + stat_type][k_report] = stat                            
 
-                    reports['test_accuracy'][k_report] = test_acc
-                    reports['test_weighted_acc'][k_report] = test_wacc
-                    reports['test_weighted_acc_indomain'][k_report] = test_wacc_masked
-                    reports['test_frac_perfect'][k_report] = test_frac_perf
-
-                    report_str += f', {test_frac_perf*100:3.0f}% perfect (test)'
+                    report_str += f', {test_perf_stats["frac_perfect"]*100:3.0f}% perfect (test)'
                 
                 print(report_str)
             

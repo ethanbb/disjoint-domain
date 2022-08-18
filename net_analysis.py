@@ -1,5 +1,7 @@
 """Functions for analyzing the training statistics and representations of a feedforward network after training"""
 from copy import deepcopy
+from collections import namedtuple
+
 import numpy as np
 from scipy import stats
 from scipy.spatial import distance
@@ -9,6 +11,9 @@ import util
 import problem_analysis as pa
 from familytree_net import FamilyTreeNet
 from ddnet import DisjointDomainNet
+
+
+NetResults = namedtuple('NetResults', ['snaps', 'reports', 'net_params', 'train_params', 'extra'])
 
 
 def calc_mean_pairwise_repr_fn(repr_snaps, pairwise_fn, calc_all, include_individual=False):
@@ -159,15 +164,8 @@ def calc_paired_effective_svs_and_residuals(training_inputs, training_y, snapsho
     return basis_to_effective_svs_and_residuals(basis_mats, training_inputs, snapshots)
         
 
-def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
-                     compute_full_rdms=False, include_individual_corr_mats=False, include_individual_rdms=False,
-                     extra_keys=None, include_rdms=False, effective_sv_snaps=(), pair_effective_sv_snaps=(),
-                    first_group_extra_sv_modes=False):
-    """
-    Get dict of data (meaned over runs) from saved file
-    If subsample_snaps is > 1, use only every nth snapshot
-    Indexes into runs using the 'runs' argument
-    """
+def load_results_properly(res_path, extra_keys=None):
+    """Load results file and return a NetResults tuple, including any extra information requested."""
     if extra_keys is None:
         extra_keys = []
         
@@ -184,6 +182,20 @@ def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric=
                 extra_keys.append(key)
 
         extra = {key: resfile[key].item() if resfile[key].dtype == 'object' else resfile[key] for key in extra_keys}
+        
+    return NetResults(snaps=snaps, reports=reports, net_params=net_params, train_params=train_params, extra=extra)
+    
+    
+def get_result_means(res_path, subsample_snaps=1, runs=slice(None), dist_metric='euclidean', corr_type='pearson',
+                     compute_full_rdms=False, include_individual_corr_mats=False, include_individual_rdms=False,
+                     extra_keys=None, include_rdms=False, effective_sv_snaps=(), pair_effective_sv_snaps=(),
+                     first_group_extra_sv_modes=False):
+    """
+    Get dict of data (meaned over runs) from saved file
+    If subsample_snaps is > 1, use only every nth snapshot
+    Indexes into runs using the 'runs' argument
+    """
+    snaps, reports, net_params, train_params, extra = load_results_properly(res_path, extra_keys)
     
     # if we did domain holdout testing, exclude the last domain(s) from snapshots
     nd = net_params['n_domains'] if 'n_domains' in net_params else len(net_params['trees'])
@@ -384,11 +396,9 @@ def plot_report(ax, res, report_type, with_ci=True, median=False, label=None, ti
     ax.set_title(title)
     
     
-def plot_individual_reports(ax, res, report_type, title=None, **plot_params):
+def plot_individual_reports_from_path(ax, res_path, report_type, title=None, **plot_params):
     """Take a closer look by looking at a statistic for each run in a set."""
-    with np.load(res['path'], allow_pickle=True) as resfile:
-        all_reports = resfile['reports'].item()[report_type]
-
+    all_reports = load_results_properly(res_path).reports[report_type]
     xaxis = res['etg_epochs'] if report_type[:3] == 'etg' else res['report_epochs']
 
     for (i, report) in enumerate(all_reports):
@@ -399,7 +409,11 @@ def plot_individual_reports(ax, res, report_type, title=None, **plot_params):
         title = report_type
     ax.set_title(title + ' (each run)')
     util.outside_legend(ax, ncol=2, fontsize='x-small')
+                                    
     
+def plot_individual_reports(ax, res, report_type, title=None, **plot_params):
+    plot_individual_reports_from_path(ax, res['path'], report_type, title, **plot_params)                                    
+                                        
     
 def plot_rdm(ax, res, snap_type, snap_ind, labels, title_addon=None, fix_range=False,
              colorbar=True, actual_mat=None, tick_fontsize='x-small'):
@@ -487,3 +501,20 @@ def get_rdm_projections(res, snap_type, models, corr_type='pearson'):
                 else:
                     raise ValueError(f'Unrecognized correlation type "{corr_type}"')                   
     return projections
+
+
+def apply_map_to_snaps(snaps_across_runs, linear_map):
+    """
+    For each snapshot of the given type over epochs, apply the linear map.
+    This can be used to make specific comparisons between groups of items or contexts.
+    - linear_map: K x N ndarray where N = number of items or contexts (etc.)
+                  Can also be a list of 1-D vectors of length N.
+    """
+    if not isinstance(linear_map, np.ndarray):
+        linear_map = np.stack(linear_map)        
+    return linear_map @ np.nan_to_num(snaps_across_runs)
+
+
+def apply_map_to_snaps_from_path(res_path, snap_type, linear_map):
+    snaps = load_results_properly(res_path).snaps[snap_type]
+    return apply_map_to_snaps(snaps, linear_map)
